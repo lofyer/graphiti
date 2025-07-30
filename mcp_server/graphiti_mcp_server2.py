@@ -13,6 +13,7 @@ from typing import Any, TypedDict, cast
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, Field
+import uvicorn
 
 from graphiti_core import Graphiti
 from graphiti_core.edges import EntityEdge
@@ -39,6 +40,10 @@ DEFAULT_EMBEDDER_MODEL = 'text-embedding-3-small'
 # Decrease this if you're experiencing 429 rate limit errors from your LLM provider.
 # Increase if you have high rate limits.
 SEMAPHORE_LIMIT = int(os.getenv('SEMAPHORE_LIMIT', 10))
+
+# Server port configurations
+API_SERVER_PORT = int(os.getenv('API_SERVER_PORT', 8000))
+MCP_SERVER_SSE_PORT = int(os.getenv('MCP_SERVER_SSE_PORT', 8001))
 
 
 class Requirement(BaseModel):
@@ -398,11 +403,12 @@ class MCPConfig(BaseModel):
     """Configuration for MCP server."""
 
     transport: str = 'sse'  # Default to SSE transport
+    dual_server: bool = False  # Whether to run dual server mode
 
     @classmethod
     def from_cli(cls, args: argparse.Namespace) -> 'MCPConfig':
         """Create MCP configuration from CLI arguments."""
-        return cls(transport=args.transport)
+        return cls(transport=args.transport, dual_server=args.dual_server)
 
 
 # Configure logging
@@ -1092,6 +1098,11 @@ async def initialize_server() -> MCPConfig:
         default=os.environ.get('MCP_SERVER_HOST'),
         help='Host to bind the MCP server to (default: MCP_SERVER_HOST environment variable)',
     )
+    parser.add_argument(
+        '--dual-server',
+        action='store_true',
+        help='Run both MCP server and FastAPI server simultaneously (MCP on port 8001, API on port 8000)',
+    )
 
     args = parser.parse_args()
 
@@ -1122,6 +1133,114 @@ async def initialize_server() -> MCPConfig:
     return MCPConfig.from_cli(args)
 
 
+async def run_dual_servers():
+    """Run both MCP server and FastAPI server in the same event loop."""
+    # Initialize the server configuration
+    mcp_config = await initialize_server()
+
+    # Only support SSE transport for dual server mode
+    if mcp_config.transport != 'sse':
+        logger.error("Dual server mode only supports SSE transport")
+        raise ValueError("Dual server mode requires SSE transport")
+
+    # Import FastAPI application from graph_service
+    try:
+        # Add the graph_service directory to Python path
+        import sys
+        graph_service_path = os.path.join(os.path.dirname(__file__), '..', 'server')
+        abs_graph_service_path = os.path.abspath(graph_service_path)
+        logger.info(f"[API] Adding graph_service path: {abs_graph_service_path}")
+
+        if abs_graph_service_path not in sys.path:
+            sys.path.insert(0, abs_graph_service_path)
+
+        # Check if the path exists
+        if not os.path.exists(abs_graph_service_path):
+            raise ImportError(f"graph_service path does not exist: {abs_graph_service_path}")
+
+        # Import FastAPI components
+        from fastapi import FastAPI, Depends
+        from fastapi.responses import JSONResponse
+        from typing import Annotated
+
+        # Import graph_service components
+        from graph_service.routers import ingest, retrieve
+        from graph_service.zep_graphiti import ZepGraphiti
+
+        # Create a custom dependency that returns our global graphiti_client
+        async def get_shared_graphiti():
+            """Return the shared graphiti client instance."""
+            if graphiti_client is None:
+                raise RuntimeError("Graphiti client not initialized")
+
+            # Wrap our standard Graphiti client to make it compatible with ZepGraphiti interface
+            # Since both inherit from the same base, we can use our client directly
+            return graphiti_client
+
+        # Create the dependency annotation
+        SharedGraphitiDep = Annotated[Graphiti, Depends(get_shared_graphiti)]
+
+        # Monkey patch the dependency in the routers
+        import graph_service.routers.ingest as ingest_module
+        import graph_service.routers.retrieve as retrieve_module
+
+        # Replace ZepGraphitiDep with our SharedGraphitiDep
+        ingest_module.ZepGraphitiDep = SharedGraphitiDep
+        retrieve_module.ZepGraphitiDep = SharedGraphitiDep
+
+        # Create a new FastAPI app without the lifespan manager
+        fastapi_app = FastAPI(title="Graphiti Graph Service", version="1.0.0")
+
+        # Include the routers
+        fastapi_app.include_router(retrieve.router)
+        fastapi_app.include_router(ingest.router)
+
+        # Add healthcheck endpoint
+        @fastapi_app.get('/healthcheck')
+        async def healthcheck():
+            return JSONResponse(content={'status': 'healthy'}, status_code=200)
+
+        logger.info("[API] Successfully created FastAPI application with shared Graphiti client")
+
+        # Log available routes
+        logger.info(f"[API] Available routes:")
+        for route in fastapi_app.routes:
+            logger.info(f"[API]   {route.methods if hasattr(route, 'methods') else 'N/A'} {route.path}")
+
+    except ImportError as e:
+        logger.error(f"[API] Failed to import graph_service: {e}")
+        logger.error(f"[API] Current sys.path: {sys.path}")
+        raise
+
+    # Configure MCP server port
+    mcp.settings.port = MCP_SERVER_SSE_PORT
+
+    # Create uvicorn server configuration for FastAPI
+    uvicorn_config = uvicorn.Config(
+        app=fastapi_app,
+        host="0.0.0.0",
+        port=API_SERVER_PORT,
+        log_level="info",
+        access_log=True
+    )
+    uvicorn_server = uvicorn.Server(uvicorn_config)
+
+    # Log startup information
+    logger.info(f"[MCP] Starting MCP server with SSE transport on {mcp.settings.host}:{MCP_SERVER_SSE_PORT}")
+    logger.info(f"[API] Starting FastAPI server on 0.0.0.0:{API_SERVER_PORT}")
+
+    # Start both servers concurrently
+    try:
+        mcp_task = asyncio.create_task(mcp.run_sse_async())
+        api_task = asyncio.create_task(uvicorn_server.serve())
+
+        # Wait for both servers to complete
+        await asyncio.gather(mcp_task, api_task)
+    except Exception as e:
+        logger.error(f"Error running dual servers: {e}")
+        raise
+
+
 async def run_mcp_server():
     """Run the MCP server in the current event loop."""
     # Initialize the server
@@ -1141,10 +1260,19 @@ async def run_mcp_server():
 def main():
     """Main function to run the Graphiti MCP server."""
     try:
-        # Run everything in a single event loop
-        asyncio.run(run_mcp_server())
+        # Parse arguments to check if dual server mode is requested
+        parser = argparse.ArgumentParser(add_help=False)
+        parser.add_argument('--dual-server', action='store_true')
+        args, _ = parser.parse_known_args()
+
+        if args.dual_server:
+            logger.info("Starting in dual server mode (MCP + FastAPI)")
+            asyncio.run(run_dual_servers())
+        else:
+            logger.info("Starting in single MCP server mode")
+            asyncio.run(run_mcp_server())
     except Exception as e:
-        logger.error(f'Error initializing Graphiti MCP server: {str(e)}')
+        logger.error(f'Error initializing Graphiti server: {str(e)}')
         raise
 
 
