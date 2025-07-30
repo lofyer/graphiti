@@ -11,7 +11,6 @@ import sys
 from datetime import datetime, timezone
 from typing import Any, TypedDict, cast
 
-from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, Field
 
@@ -22,6 +21,7 @@ from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
 from graphiti_core.llm_client import LLMClient
 from graphiti_core.llm_client.config import LLMConfig
 from graphiti_core.llm_client.openai_client import OpenAIClient
+from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
 from graphiti_core.nodes import EpisodeType, EpisodicNode
 from graphiti_core.search.search_config_recipes import (
     NODE_HYBRID_SEARCH_NODE_DISTANCE,
@@ -29,8 +29,6 @@ from graphiti_core.search.search_config_recipes import (
 )
 from graphiti_core.search.search_filters import SearchFilters
 from graphiti_core.utils.maintenance.graph_data_operations import clear_data
-
-load_dotenv()
 
 
 DEFAULT_LLM_MODEL = 'gpt-4.1-mini'
@@ -172,7 +170,7 @@ class StatusResponse(TypedDict):
 #   - Various other settings like group_id and feature flags
 # Configuration values are loaded from:
 # 1. Default values in the class definitions
-# 2. Environment variables (loaded via load_dotenv())
+# 2. System environment variables (directly from Docker container environment)
 # 3. Command line arguments (which override environment variables)
 class GraphitiLLMConfig(BaseModel):
     """Configuration for the LLM client.
@@ -184,6 +182,8 @@ class GraphitiLLMConfig(BaseModel):
     model: str = DEFAULT_LLM_MODEL
     small_model: str = SMALL_LLM_MODEL
     temperature: float = 0.0
+    openai_compatible: bool = False
+    base_url: str | None = None
 
     @classmethod
     def from_env(cls) -> 'GraphitiLLMConfig':
@@ -196,6 +196,10 @@ class GraphitiLLMConfig(BaseModel):
         small_model_env = os.environ.get('SMALL_MODEL_NAME', '')
         small_model = small_model_env if small_model_env.strip() else SMALL_LLM_MODEL
 
+        # Get base_url from environment
+        base_url = os.environ.get('OPENAI_BASE_URL', '').strip()
+        base_url = base_url if base_url else None
+
         # Setup for OpenAI API
         # Log if empty model was provided
         if model_env == '':
@@ -207,11 +211,15 @@ class GraphitiLLMConfig(BaseModel):
                 f'Empty MODEL_NAME environment variable, using default: {DEFAULT_LLM_MODEL}'
             )
 
+
+
         return cls(
             api_key=os.environ.get('OPENAI_API_KEY'),
             model=model,
             small_model=small_model,
             temperature=float(os.environ.get('LLM_TEMPERATURE', '0.0')),
+            openai_compatible=os.environ.get('OPENAI_COMPATIBLE', 'false').lower() == 'true',
+            base_url=base_url,
         )
 
     @classmethod
@@ -238,6 +246,9 @@ class GraphitiLLMConfig(BaseModel):
         if hasattr(args, 'temperature') and args.temperature is not None:
             config.temperature = args.temperature
 
+        # CLI base_url would override environment if we had such argument
+        # For now, we rely on environment variables only
+
         return config
 
     def create_client(self) -> LLMClient:
@@ -250,13 +261,20 @@ class GraphitiLLMConfig(BaseModel):
             raise ValueError('OPENAI_API_KEY must be set when using OpenAI API')
 
         llm_client_config = LLMConfig(
-            api_key=self.api_key, model=self.model, small_model=self.small_model
+            api_key=self.api_key,
+            model=self.model,
+            small_model=self.small_model,
+            base_url=self.base_url,
+            temperature=self.temperature
         )
 
-        # Set temperature
-        llm_client_config.temperature = self.temperature
-
-        return OpenAIClient(config=llm_client_config)
+        # Choose client based on openai_compatible flag (user controlled)
+        if self.openai_compatible:
+            logger.info("Using OpenAI Generic Client (user specified via OPENAI_COMPATIBLE=true)")
+            return OpenAIGenericClient(config=llm_client_config)
+        else:
+            logger.info("Using standard OpenAI Client (default or user specified via OPENAI_COMPATIBLE=false)")
+            return OpenAIClient(config=llm_client_config)
 
 
 class GraphitiEmbedderConfig(BaseModel):
@@ -267,19 +285,26 @@ class GraphitiEmbedderConfig(BaseModel):
 
     model: str = DEFAULT_EMBEDDER_MODEL
     api_key: str | None = None
+    base_url: str | None = None
+    dimension: int = 1536
 
     @classmethod
     def from_env(cls) -> 'GraphitiEmbedderConfig':
         """Create embedder configuration from environment variables."""
 
-        # 优先使用专门的嵌入模型配置，然后回退到通用配置
+        # 严格按照传递的环境变量使用，传递什么就用什么
         # Get model from environment, or use default if not set or empty
-        model_env = os.environ.get('OPENAI_EMBEDDER_MODEL_ID', '') or os.environ.get(
-            'EMBEDDER_MODEL_NAME', ''
-        )
-        model = model_env if model_env.strip() else DEFAULT_EMBEDDER_MODEL
+        model_env = os.environ.get('OPENAI_EMBEDDER_MODEL_ID', '').strip()
+        model = model_env if model_env else DEFAULT_EMBEDDER_MODEL
 
-        # 优先使用专门的嵌入模型API Key，如果没有或者是占位符则使用通用API Key
+        # Get base_url from environment
+        base_url = os.environ.get('OPENAI_EMBEDDER_API_URL', '').strip()
+        base_url = base_url if base_url else None
+
+        # Get dimension from environment
+        dimension = int(os.environ.get('OPENAI_EMBEDDER_DIMENSION', '1536'))
+
+        # 严格按照传递的API Key使用
         embedder_api_key = os.environ.get('OPENAI_EMBEDDER_API_KEY', '').strip()
         if embedder_api_key and embedder_api_key != 'no-api-key':
             api_key = embedder_api_key
@@ -289,32 +314,22 @@ class GraphitiEmbedderConfig(BaseModel):
         return cls(
             model=model,
             api_key=api_key,
+            base_url=base_url,
+            dimension=dimension,
         )
 
     def create_client(self) -> EmbedderClient | None:
-        # OpenAI API setup (支持自定义base_url)
+        """Create an embedder client based on this configuration."""
         if not self.api_key:
             return None
 
-        # 检查是否有自定义的base_url
-        base_url = os.environ.get('OPENAI_EMBEDDER_API_URL', '').strip()
-
-        # 获取嵌入维度配置，默认为1536（OpenAI text-embedding-3-small的维度）
-        embedding_dim = int(os.environ.get('OPENAI_EMBEDDER_DIMENSION', '1536'))
-
-        if base_url:
-            # 使用自定义base_url的OpenAI兼容API
-            embedder_config = OpenAIEmbedderConfig(
-                api_key=self.api_key,
-                embedding_model=self.model,
-                embedding_dim=embedding_dim,
-                base_url=base_url,
-            )
-        else:
-            # 使用默认的OpenAI API
-            embedder_config = OpenAIEmbedderConfig(
-                api_key=self.api_key, embedding_model=self.model, embedding_dim=embedding_dim
-            )
+        # 根据官方文档，OpenAIEmbedderConfig 直接支持所有参数
+        embedder_config = OpenAIEmbedderConfig(
+            api_key=self.api_key,
+            embedding_model=self.model,
+            embedding_dim=self.dimension,
+            base_url=self.base_url,  # None 也是有效值，表示使用默认 OpenAI API
+        )
 
         return OpenAIEmbedder(config=embedder_config)
 

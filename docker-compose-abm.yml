@@ -46,6 +46,7 @@ services:
       - MODEL_NAME=${MODEL_NAME:-mistral-small3.2:24b}
       - SMALL_MODEL_NAME=${SMALL_MODEL_NAME:-mistral-small3.2:24b}
       - OPENAI_BASE_URL=${OPENAI_BASE_URL:-http://10.7.0.22:11434/v1}
+      - OPENAI_COMPATIBLE=${OPENAI_COMPATIBLE:-false}
       # Optional Configuration
       - GROUP_ID=${GROUP_ID}
       - SEMAPHORE_LIMIT=${SEMAPHORE_LIMIT:-10}
@@ -65,7 +66,7 @@ services:
           "CMD",
           "python",
           "-c",
-          "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthcheck')",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8001')",
         ]
       interval: 10s
       timeout: 5s
