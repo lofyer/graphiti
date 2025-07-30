@@ -1,0 +1,71 @@
+# syntax=docker/dockerfile:1.9
+FROM python:3.12-slim
+
+WORKDIR /app
+
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+ARG PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn
+ARG APT_MIRROR=mirrors.aliyun.com
+
+# Configure pip mirrors
+ENV PIP_INDEX_URL=${PIP_INDEX_URL}
+ENV PIP_TRUSTED_HOST=${PIP_TRUSTED_HOST}
+ENV PYTHONUNBUFFERED=1
+
+# Configure apt mirror
+RUN if [ -n "${APT_MIRROR}" ]; then \
+    sed -i "s/deb.debian.org/${APT_MIRROR}/g" /etc/apt/sources.list.d/debian.sources && \
+    sed -i "s/security.debian.org/${APT_MIRROR}/g" /etc/apt/sources.list.d/debian.sources; \
+    fi
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    curl \
+    ca-certificates \
+    wget \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy and install graphiti-core from source
+COPY ./pyproject.toml ./README.md ./
+COPY ./graphiti_core ./graphiti_core
+
+# Install graphiti-core from source
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --index-url ${PIP_INDEX_URL} --trusted-host ${PIP_TRUSTED_HOST} .
+
+# Install additional dependencies for MCP server and Graph service
+RUN pip install --index-url ${PIP_INDEX_URL} --trusted-host ${PIP_TRUSTED_HOST} \
+    graphiti-core[falkordb] \
+    mcp>=1.5.0 \
+    python-dotenv>=1.0.0 \
+    pydantic>=2.0.0 \
+    uvicorn>=0.24.0 \
+    fastapi>=0.104.0
+
+# Copy Graph service and MCP server files
+COPY ./server/graph_service ./server/graph_service
+COPY ./mcp_server/graphiti_mcp_server.py ./mcp_server/graphiti_mcp_server2.py ./mcp_server/
+
+# Create non-root user and set ownership
+RUN groupadd -r app && useradd -r -d /app -g app app && \
+    chown -R app:app /app
+
+# Set environment variables
+ENV MCP_SERVER_HOST="0.0.0.0" \
+    PORT=8000
+
+# Switch to non-root user
+USER app
+
+# Expose ports
+EXPOSE 8000
+
+# Set Python path to include server directory
+ENV PYTHONPATH="/app/server:$PYTHONPATH"
+
+# Default command runs the Graph service
+# Can be overridden in docker-compose for different services
+CMD ["python", "-m", "uvicorn", "graph_service.main:app", "--host", "0.0.0.0", "--port", "8000"]
