@@ -1159,13 +1159,20 @@ async def run_dual_servers():
             raise ImportError(f"graph_service path does not exist: {abs_graph_service_path}")
 
         # Import FastAPI components
-        from fastapi import FastAPI, Depends
+        from fastapi import FastAPI, Depends, APIRouter, status
         from fastapi.responses import JSONResponse
         from typing import Annotated
+        from datetime import datetime, timezone
+        from functools import partial
+        import asyncio
 
-        # Import graph_service components
-        from graph_service.routers import ingest, retrieve
-        from graph_service.zep_graphiti import ZepGraphiti
+        # Import DTO classes
+        from graph_service.dto import (
+            AddEntityNodeRequest, AddMessagesRequest, Message, Result,
+            GetMemoryRequest, GetMemoryResponse, SearchQuery, SearchResults
+        )
+        from graph_service.zep_graphiti import get_fact_result_from_edge
+        from graphiti_core.nodes import EpisodeType
 
         # Create a custom dependency that returns our global graphiti_client
         async def get_shared_graphiti():
@@ -1173,27 +1180,137 @@ async def run_dual_servers():
             if graphiti_client is None:
                 raise RuntimeError("Graphiti client not initialized")
 
-            # Wrap our standard Graphiti client to make it compatible with ZepGraphiti interface
-            # Since both inherit from the same base, we can use our client directly
+            logger.info("[API] Using shared Graphiti client instance")
             return graphiti_client
 
         # Create the dependency annotation
         SharedGraphitiDep = Annotated[Graphiti, Depends(get_shared_graphiti)]
 
-        # Monkey patch the dependency in the routers
-        import graph_service.routers.ingest as ingest_module
-        import graph_service.routers.retrieve as retrieve_module
+        # Create custom routers that use our shared client
+        retrieve_router = APIRouter()
+        ingest_router = APIRouter()
 
-        # Replace ZepGraphitiDep with our SharedGraphitiDep
-        ingest_module.ZepGraphitiDep = SharedGraphitiDep
-        retrieve_module.ZepGraphitiDep = SharedGraphitiDep
+        # Retrieve router endpoints
+        @retrieve_router.post('/search', status_code=status.HTTP_200_OK)
+        async def search(query: SearchQuery, graphiti: SharedGraphitiDep):
+            relevant_edges = await graphiti.search(
+                group_ids=query.group_ids,
+                query=query.query,
+                num_results=query.max_facts,
+            )
+            facts = [get_fact_result_from_edge(edge) for edge in relevant_edges]
+            return SearchResults(facts=facts)
+
+        @retrieve_router.get('/entity-edge/{uuid}', status_code=status.HTTP_200_OK)
+        async def get_entity_edge(uuid: str, graphiti: SharedGraphitiDep):
+            from graphiti_core.edges import EntityEdge
+            entity_edge = await EntityEdge.get_by_uuid(graphiti.driver, uuid)
+            return get_fact_result_from_edge(entity_edge)
+
+        @retrieve_router.get('/episodes/{group_id}', status_code=status.HTTP_200_OK)
+        async def get_episodes(group_id: str, last_n: int, graphiti: SharedGraphitiDep):
+            episodes = await graphiti.retrieve_episodes(
+                group_ids=[group_id], last_n=last_n, reference_time=datetime.now(timezone.utc)
+            )
+            return episodes
+
+        @retrieve_router.post('/get-memory', status_code=status.HTTP_200_OK)
+        async def get_memory(request: GetMemoryRequest, graphiti: SharedGraphitiDep):
+            def compose_query_from_messages(messages: list[Message]):
+                combined_query = ''
+                for message in messages:
+                    combined_query += f'{message.role_type or ""}({message.role or ""}): {message.content}\n'
+                return combined_query
+
+            combined_query = compose_query_from_messages(request.messages)
+            result = await graphiti.search(
+                group_ids=[request.group_id],
+                query=combined_query,
+                num_results=request.max_facts,
+            )
+            facts = [get_fact_result_from_edge(edge) for edge in result]
+            return GetMemoryResponse(facts=facts)
+
+        # Ingest router endpoints
+        # Create a simple async worker queue for messages (simplified version)
+        message_queue = asyncio.Queue()
+
+        async def process_message_queue():
+            """Simple message processor"""
+            while True:
+                try:
+                    process_func = await message_queue.get()
+                    await process_func()
+                    message_queue.task_done()
+                except Exception as e:
+                    logger.error(f"[API] Error processing message: {e}")
+
+        # Start the message processor task
+        asyncio.create_task(process_message_queue())
+
+        @ingest_router.post('/messages', status_code=status.HTTP_202_ACCEPTED)
+        async def add_messages(request: AddMessagesRequest, graphiti: SharedGraphitiDep):
+            async def add_messages_task(m: Message):
+                await graphiti.add_episode(
+                    uuid=m.uuid,
+                    group_id=request.group_id,
+                    name=m.name,
+                    episode_body=f'{m.role or ""}({m.role_type}): {m.content}',
+                    reference_time=m.timestamp,
+                    source=EpisodeType.message,
+                    source_description=m.source_description,
+                )
+
+            for m in request.messages:
+                await message_queue.put(partial(add_messages_task, m))
+
+            return Result(message='Messages added to processing queue', success=True)
+
+        @ingest_router.post('/entity-node', status_code=status.HTTP_201_CREATED)
+        async def add_entity_node(request: AddEntityNodeRequest, graphiti: SharedGraphitiDep):
+            from graphiti_core.nodes import EntityNode
+            new_node = EntityNode(
+                name=request.name,
+                uuid=request.uuid,
+                group_id=request.group_id,
+                summary=request.summary,
+            )
+            await new_node.generate_name_embedding(graphiti.embedder)
+            await new_node.save(graphiti.driver)
+            return new_node
+
+        @ingest_router.delete('/entity-edge/{uuid}', status_code=status.HTTP_200_OK)
+        async def delete_entity_edge(uuid: str, graphiti: SharedGraphitiDep):
+            from graphiti_core.edges import EntityEdge
+            entity_edge = await EntityEdge.get_by_uuid(graphiti.driver, uuid)
+            await entity_edge.delete(graphiti.driver)
+            return Result(message='Entity Edge deleted', success=True)
+
+        @ingest_router.delete('/group/{group_id}', status_code=status.HTTP_200_OK)
+        async def delete_group(group_id: str, graphiti: SharedGraphitiDep):
+            await graphiti.delete_group(group_id)
+            return Result(message='Group deleted', success=True)
+
+        @ingest_router.delete('/episode/{uuid}', status_code=status.HTTP_200_OK)
+        async def delete_episode(uuid: str, graphiti: SharedGraphitiDep):
+            from graphiti_core.nodes import EpisodicNode
+            episodic_node = await EpisodicNode.get_by_uuid(graphiti.driver, uuid)
+            await episodic_node.delete(graphiti.driver)
+            return Result(message='Episode deleted', success=True)
+
+        @ingest_router.post('/clear', status_code=status.HTTP_200_OK)
+        async def clear(graphiti: SharedGraphitiDep):
+            from graphiti_core.utils.maintenance.graph_data_operations import clear_data
+            await clear_data(graphiti.driver)
+            await graphiti.build_indices_and_constraints()
+            return Result(message='Graph cleared', success=True)
 
         # Create a new FastAPI app without the lifespan manager
         fastapi_app = FastAPI(title="Graphiti Graph Service", version="1.0.0")
 
-        # Include the routers
-        fastapi_app.include_router(retrieve.router)
-        fastapi_app.include_router(ingest.router)
+        # Include our custom routers
+        fastapi_app.include_router(retrieve_router)
+        fastapi_app.include_router(ingest_router)
 
         # Add healthcheck endpoint
         @fastapi_app.get('/healthcheck')
