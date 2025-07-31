@@ -23,6 +23,11 @@ services:
       - SMALL_MODEL_NAME=${SMALL_MODEL_NAME:-mistral-small3.2:24b}
       - OPENAI_BASE_URL=${OPENAI_BASE_URL:-http://10.7.0.22:11434/v1}
       - OPENAI_COMPATIBLE=${OPENAI_COMPATIBLE:-false}
+      # Reranker/Cross-Encoder Configuration
+      - RERANKER_TYPE=${RERANKER_TYPE:-llm}
+      - RERANK_MODEL_ID=${RERANK_MODEL_ID:-gpt-4.1-nano}
+      - RERANK_MODEL_API_KEY=${RERANK_MODEL_API_KEY:-${OPENAI_API_KEY}}
+      - RERANK_MODEL_API_URL=${RERANK_MODEL_API_URL:-${OPENAI_BASE_URL}}
       # Optional Configuration
       - GROUP_ID=${GROUP_ID}
       - SEMAPHORE_LIMIT=${SEMAPHORE_LIMIT:-10}

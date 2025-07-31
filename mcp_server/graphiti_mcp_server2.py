@@ -14,6 +14,7 @@ from typing import Any, TypedDict, cast
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, Field
 import uvicorn
+from fastapi import HTTPException
 
 from graphiti_core import Graphiti
 from graphiti_core.edges import EntityEdge
@@ -27,9 +28,15 @@ from graphiti_core.nodes import EpisodeType, EpisodicNode
 from graphiti_core.search.search_config_recipes import (
     NODE_HYBRID_SEARCH_NODE_DISTANCE,
     NODE_HYBRID_SEARCH_RRF,
+    COMBINED_HYBRID_SEARCH_CROSS_ENCODER,
+    COMBINED_HYBRID_SEARCH_RRF,
+    COMBINED_HYBRID_SEARCH_MMR,
+    EDGE_HYBRID_SEARCH_CROSS_ENCODER,
+    EDGE_HYBRID_SEARCH_EPISODE_MENTIONS
 )
 from graphiti_core.search.search_filters import SearchFilters
 from graphiti_core.utils.maintenance.graph_data_operations import clear_data
+from graphiti_core.cross_encoder.client import CrossEncoderClient
 
 
 DEFAULT_LLM_MODEL = 'gpt-4.1-mini'
@@ -44,6 +51,45 @@ SEMAPHORE_LIMIT = int(os.getenv('SEMAPHORE_LIMIT', 10))
 # Server port configurations
 API_SERVER_PORT = int(os.getenv('API_SERVER_PORT', 8000))
 MCP_SERVER_SSE_PORT = int(os.getenv('MCP_SERVER_SSE_PORT', 8001))
+
+# Advanced Search Configurations
+SEARCH_STRATEGY_CONFIGS = {
+    # 基础策略配置
+    'cross_encoder': {
+        'config': COMBINED_HYBRID_SEARCH_CROSS_ENCODER,
+        'description': '最高精度，适合复杂查询',
+        'performance': 'high_accuracy'
+    },
+    'rrf': {
+        'config': COMBINED_HYBRID_SEARCH_RRF,
+        'description': '平衡性能和质量',
+        'performance': 'balanced'
+    },
+    'mmr': {
+        'config': COMBINED_HYBRID_SEARCH_MMR,
+        'description': '多样性结果（谨慎使用）',
+        'performance': 'diverse'
+    }
+}
+
+QUERY_TYPE_CONFIGS = {
+    # 查询类型特化配置
+    'factual': {
+        'config': EDGE_HYBRID_SEARCH_CROSS_ENCODER,
+        'description': '事实查询：什么是、谁是',
+        'use_case': 'factual_queries'
+    },
+    'relational': {
+        'config': NODE_HYBRID_SEARCH_NODE_DISTANCE,
+        'description': '关系查询：A和B的关系',
+        'use_case': 'relationship_queries'
+    },
+    'temporal': {
+        'config': EDGE_HYBRID_SEARCH_EPISODE_MENTIONS,
+        'description': '时间查询：最近发生、历史变化',
+        'use_case': 'temporal_queries'
+    }
+}
 
 
 class Requirement(BaseModel):
@@ -339,6 +385,212 @@ class GraphitiEmbedderConfig(BaseModel):
         return OpenAIEmbedder(config=embedder_config)
 
 
+class StandardRerankerClient(CrossEncoderClient):
+    """Standard reranker client that uses standard reranking API endpoints."""
+
+    def __init__(self, model: str, api_key: str, base_url: str | None = None):
+        self.model = model
+        self.api_key = api_key
+        self.base_url = base_url
+
+        # Create HTTP client for API calls
+        import httpx
+        self.client = httpx.AsyncClient(
+            base_url=base_url,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            },
+            timeout=30.0
+        )
+
+    async def rank(self, query: str, passages: list[str]) -> list[tuple[str, float]]:
+        """Rank passages using standard reranking API."""
+        if not passages:
+            return []
+
+        try:
+            # Use standard reranking API format
+            response = await self.client.post(
+                "/rerank",
+                json={
+                    "model": self.model,
+                    "query": query,
+                    "documents": passages,
+                    "top_k": len(passages),
+                    "return_documents": False
+                }
+            )
+            response.raise_for_status()
+
+            result = response.json()
+            ranked_passages = []
+
+            # Parse standard reranking API response
+            for item in result.get("results", []):
+                index = item.get("index", 0)
+                score = item.get("relevance_score", 0.0)
+                if 0 <= index < len(passages):
+                    ranked_passages.append((passages[index], float(score)))
+
+            # Sort by score (descending)
+            ranked_passages.sort(key=lambda x: x[1], reverse=True)
+
+            return ranked_passages
+
+        except Exception as e:
+            logger.error(f"Reranking API failed: {e}")
+            raise
+
+
+class LLMBasedRerankerClient(CrossEncoderClient):
+    """LLM-based reranker client that uses text generation models for reranking."""
+
+    def __init__(self, model: str, api_key: str, base_url: str | None = None):
+        self.model = model
+        self.api_key = api_key
+        self.base_url = base_url
+
+        # Create OpenAI client for API calls
+        import openai
+        self.client = openai.AsyncOpenAI(
+            api_key=api_key,
+            base_url=base_url
+        )
+
+    async def rank(self, query: str, passages: list[str]) -> list[tuple[str, float]]:
+        """Rank passages using LLM-based scoring."""
+        if not passages:
+            return []
+
+        try:
+            scores = []
+
+            for passage in passages:
+                response = await self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "You are an expert tasked with determining whether the passage is relevant to the query"
+                        },
+                        {
+                            "role": "user",
+                            "content": f"""
+                                       Respond with "True" if PASSAGE is relevant to QUERY and "False" otherwise.
+                                       <PASSAGE>
+                                       {passage}
+                                       </PASSAGE>
+                                       <QUERY>
+                                       {query}
+                                       </QUERY>
+                                       """
+                        }
+                    ],
+                    temperature=0,
+                    max_tokens=1,
+                    logit_bias={'6432': 1, '7983': 1},  # True/False tokens
+                    logprobs=True,
+                    top_logprobs=2,
+                )
+
+                # Extract score from logprobs
+                try:
+                    if (response.choices[0].logprobs and
+                        response.choices[0].logprobs.content and
+                        len(response.choices[0].logprobs.content) > 0):
+
+                        top_logprobs = response.choices[0].logprobs.content[0].top_logprobs
+                        if len(top_logprobs) > 0:
+                            import numpy as np
+                            norm_logprobs = np.exp(top_logprobs[0].logprob)
+                            if top_logprobs[0].token.strip().split(' ')[0].lower() == 'true':
+                                score = norm_logprobs
+                            else:
+                                score = 1 - norm_logprobs
+                        else:
+                            score = 0.5
+                    else:
+                        score = 0.5
+                except Exception:
+                    score = 0.5
+
+                scores.append(float(score))
+
+            # Combine passages with scores and sort by score (descending)
+            ranked_passages = list(zip(passages, scores))
+            ranked_passages.sort(key=lambda x: x[1], reverse=True)
+
+            return ranked_passages
+
+        except Exception as e:
+            logger.error(f"LLM-based reranking failed: {e}")
+            raise
+
+
+class GraphitiRerankerConfig(BaseModel):
+    """Configuration for Graphiti reranker/cross-encoder."""
+
+    model: str = 'bge-reranker-v2-m3'
+    api_key: str | None = None
+    base_url: str | None = None
+    reranker_type: str = 'reranker'  # 'reranker' or 'llm'
+
+    def create_client(self) -> CrossEncoderClient | None:
+        """Create a reranker client from the configuration."""
+        if not self.api_key:
+            # No API key provided, no reranker will be used
+            logger.info("No reranker API key provided, reranker disabled")
+            return None
+
+        # Choose client based on reranker type
+        if self.reranker_type == 'llm':
+            logger.info("Using LLM-based reranker client")
+            return LLMBasedRerankerClient(
+                model=self.model,
+                api_key=self.api_key,
+                base_url=self.base_url
+            )
+        else:
+            logger.info("Using standard reranker client")
+            return StandardRerankerClient(
+                model=self.model,
+                api_key=self.api_key,
+                base_url=self.base_url
+            )
+
+    @classmethod
+    def from_env(cls) -> 'GraphitiRerankerConfig':
+        """Create reranker configuration from environment variables."""
+
+        # Get reranker type from environment
+        reranker_type_env = os.environ.get('RERANKER_TYPE', '').strip()
+        reranker_type = reranker_type_env if reranker_type_env in ['reranker', 'llm'] else 'reranker'
+
+        # Get model from environment, or use default if not set or empty
+        model_env = os.environ.get('RERANK_MODEL_ID', '').strip()
+        model = model_env if model_env else 'gpt-4.1-nano'
+
+        # Get base_url from environment
+        base_url = os.environ.get('RERANK_MODEL_API_URL', '').strip()
+        base_url = base_url if base_url else None
+
+        # Get API key from environment
+        rerank_api_key = os.environ.get('RERANK_MODEL_API_KEY', '').strip()
+        if rerank_api_key and rerank_api_key != 'no-api-key':
+            api_key = rerank_api_key
+        else:
+            # Fallback to main OpenAI API key
+            api_key = os.environ.get('OPENAI_API_KEY', '').strip()
+
+        return cls(
+            model=model,
+            api_key=api_key,
+            base_url=base_url,
+            reranker_type=reranker_type,
+        )
+
+
 class Neo4jConfig(BaseModel):
     """Configuration for Neo4j database connection."""
 
@@ -364,6 +616,7 @@ class GraphitiConfig(BaseModel):
 
     llm: GraphitiLLMConfig = Field(default_factory=GraphitiLLMConfig)
     embedder: GraphitiEmbedderConfig = Field(default_factory=GraphitiEmbedderConfig)
+    reranker: GraphitiRerankerConfig = Field(default_factory=GraphitiRerankerConfig)
     neo4j: Neo4jConfig = Field(default_factory=Neo4jConfig)
     group_id: str | None = None
     use_custom_entities: bool = False
@@ -375,6 +628,7 @@ class GraphitiConfig(BaseModel):
         return cls(
             llm=GraphitiLLMConfig.from_env(),
             embedder=GraphitiEmbedderConfig.from_env(),
+            reranker=GraphitiRerankerConfig.from_env(),
             neo4j=Neo4jConfig.from_env(),
         )
 
@@ -409,6 +663,35 @@ class MCPConfig(BaseModel):
     def from_cli(cls, args: argparse.Namespace) -> 'MCPConfig':
         """Create MCP configuration from CLI arguments."""
         return cls(transport=args.transport, dual_server=args.dual_server)
+
+
+class AdvancedSearchRequest(BaseModel):
+    """Request model for advanced search functionality."""
+
+    query: str = Field(..., description='查询内容')
+    search_strategy: str = Field(default='cross_encoder', description='搜索策略: cross_encoder, rrf, mmr')
+    query_type: str = Field(default='factual', description='查询类型: factual, relational, temporal')
+    max_facts: int = Field(default=15, description='最大结果数', ge=1, le=100)
+    group_ids: list[str] | None = Field(default=None, description='组ID列表')
+    reranker_min_score: float = Field(default=0.6, description='重排序最低分数', ge=0.0, le=1.0)
+    sim_min_score: float = Field(default=0.5, description='相似度最低分数', ge=0.0, le=1.0)
+    use_custom_config: bool = Field(default=False, description='使用自定义配置')
+    custom_limit: int | None = Field(default=None, description='自定义结果限制', ge=1, le=100)
+    enable_filters: bool = Field(default=False, description='启用搜索过滤器')
+    node_labels: list[str] | None = Field(default=None, description='节点标签过滤')
+    edge_types: list[str] | None = Field(default=None, description='边类型过滤')
+
+
+class AdvancedSearchResponse(BaseModel):
+    """Response model for advanced search functionality."""
+
+    query: str = Field(..., description='原始查询')
+    facts: list[dict] = Field(..., description='搜索结果事实列表')
+    search_config: str = Field(..., description='使用的搜索配置')
+    query_type: str = Field(..., description='查询类型')
+    total_results: int = Field(..., description='结果总数')
+    config_description: str = Field(..., description='配置描述')
+    response_time: float | None = Field(default=None, description='响应时间（秒）')
 
 
 # Configure logging
@@ -480,6 +763,11 @@ async def initialize_graphiti():
 
         embedder_client = config.embedder.create_client()
 
+        # Create reranker client if configured
+        reranker_client = config.reranker.create_client()
+        logger.info(f"重排序配置 - Model: {config.reranker.model}, API_KEY: {'已设置' if config.reranker.api_key else '未设置'}, Base_URL: {config.reranker.base_url}")
+        logger.info(f"重排序客户端: {type(reranker_client).__name__ if reranker_client else 'None'}")
+
         # Initialize Graphiti client
         graphiti_client = Graphiti(
             uri=config.neo4j.uri,
@@ -487,6 +775,7 @@ async def initialize_graphiti():
             password=config.neo4j.password,
             llm_client=llm_client,
             embedder=embedder_client,
+            cross_encoder=reranker_client,
             max_coroutines=SEMAPHORE_LIMIT,
         )
 
@@ -505,6 +794,12 @@ async def initialize_graphiti():
             logger.info(f'Using temperature: {config.llm.temperature}')
         else:
             logger.info('No LLM client configured - entity extraction will be limited')
+
+        if reranker_client:
+            logger.info(f'Using reranker model: {config.reranker.model}')
+            logger.info(f'Reranker base URL: {config.reranker.base_url or "default"}')
+        else:
+            logger.info('No reranker client configured - using default cross-encoder')
 
         logger.info(f'Using group_id: {config.group_id}')
         logger.info(
@@ -1200,6 +1495,76 @@ async def run_dual_servers():
             )
             facts = [get_fact_result_from_edge(edge) for edge in relevant_edges]
             return SearchResults(facts=facts)
+
+        @retrieve_router.post('/search_advanced', status_code=status.HTTP_200_OK)
+        async def search_advanced(request: AdvancedSearchRequest, graphiti: SharedGraphitiDep):
+            """高级搜索端点，支持多种搜索策略和查询类型"""
+            import time
+            start_time = time.time()
+
+            try:
+                # 选择搜索配置
+                if request.use_custom_config:
+                    # 使用查询类型特化配置
+                    config_info = QUERY_TYPE_CONFIGS.get(request.query_type)
+                    if not config_info:
+                        raise ValueError(f"无效的查询类型: {request.query_type}")
+                else:
+                    # 使用基础策略配置
+                    config_info = SEARCH_STRATEGY_CONFIGS.get(request.search_strategy)
+                    if not config_info:
+                        raise ValueError(f"无效的搜索策略: {request.search_strategy}")
+
+                search_config = config_info['config']
+
+                # 动态调整配置参数
+                if request.custom_limit:
+                    search_config.limit = request.custom_limit
+                else:
+                    search_config.limit = request.max_facts
+
+                # 构建搜索过滤器
+                search_filters = None
+                if request.enable_filters:
+                    search_filters = SearchFilters(
+                        node_labels=request.node_labels,
+                        edge_types=request.edge_types
+                    )
+
+                # 执行搜索
+                results = await graphiti.search_(
+                    query=request.query,
+                    config=search_config,
+                    group_ids=request.group_ids,
+                    search_filter=search_filters
+                )
+
+                # 格式化结果
+                formatted_facts = []
+                for edge in results.edges:
+                    formatted_facts.append({
+                        'uuid': edge.uuid,
+                        'fact': edge.fact,
+                        'created_at': edge.created_at.isoformat() if edge.created_at else None,
+                        'source_node_uuid': getattr(edge, 'source_node_uuid', None),
+                        'target_node_uuid': getattr(edge, 'target_node_uuid', None)
+                    })
+
+                response_time = time.time() - start_time
+
+                return AdvancedSearchResponse(
+                    query=request.query,
+                    facts=formatted_facts,
+                    search_config=request.search_strategy if not request.use_custom_config else request.query_type,
+                    query_type=request.query_type,
+                    total_results=len(formatted_facts),
+                    config_description=config_info['description'],
+                    response_time=response_time
+                )
+
+            except Exception as e:
+                logger.error(f"高级搜索失败: {e}")
+                raise HTTPException(status_code=500, detail=f"搜索失败: {str(e)}")
 
         @retrieve_router.get('/entity-edge/{uuid}', status_code=status.HTTP_200_OK)
         async def get_entity_edge(uuid: str, graphiti: SharedGraphitiDep):
