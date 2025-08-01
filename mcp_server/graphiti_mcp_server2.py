@@ -53,40 +53,39 @@ API_SERVER_PORT = int(os.getenv('API_SERVER_PORT', 8000))
 MCP_SERVER_SSE_PORT = int(os.getenv('MCP_SERVER_SSE_PORT', 8001))
 
 # Advanced Search Configurations
-SEARCH_STRATEGY_CONFIGS = {
-    # 基础策略配置
+# 统一的搜索配置 - 合并搜索策略和查询类型
+UNIFIED_SEARCH_CONFIGS = {
+    # 基于搜索策略的配置
     'cross_encoder': {
         'config': COMBINED_HYBRID_SEARCH_CROSS_ENCODER,
-        'description': '最高精度，适合复杂查询',
+        'description': '交叉编码器重排序 - 最高精度，适合复杂查询',
+        'category': 'strategy',
         'performance': 'high_accuracy'
     },
     'rrf': {
         'config': COMBINED_HYBRID_SEARCH_RRF,
-        'description': '平衡性能和质量',
+        'description': '倒数排名融合 - 平衡性能和质量',
+        'category': 'strategy',
         'performance': 'balanced'
     },
     'mmr': {
         'config': COMBINED_HYBRID_SEARCH_MMR,
-        'description': '多样性结果（谨慎使用）',
+        'description': '最大边际相关性 - 多样性结果',
+        'category': 'strategy',
         'performance': 'diverse'
-    }
-}
+    },
 
-QUERY_TYPE_CONFIGS = {
-    # 查询类型特化配置
+    # 基于查询类型的特化配置
     'factual': {
         'config': EDGE_HYBRID_SEARCH_CROSS_ENCODER,
-        'description': '事实查询：什么是、谁是',
+        'description': '事实查询 - 专门用于"什么是"、"谁是"类问题',
+        'category': 'query_type',
         'use_case': 'factual_queries'
-    },
-    'relational': {
-        'config': NODE_HYBRID_SEARCH_NODE_DISTANCE,
-        'description': '关系查询：A和B的关系',
-        'use_case': 'relationship_queries'
     },
     'temporal': {
         'config': EDGE_HYBRID_SEARCH_EPISODE_MENTIONS,
-        'description': '时间查询：最近发生、历史变化',
+        'description': '时间查询 - 专门用于"最近发生"、"历史变化"类问题',
+        'category': 'query_type',
         'use_case': 'temporal_queries'
     }
 }
@@ -669,13 +668,11 @@ class AdvancedSearchRequest(BaseModel):
     """Request model for advanced search functionality."""
 
     query: str = Field(..., description='查询内容')
-    search_strategy: str = Field(default='cross_encoder', description='搜索策略: cross_encoder, rrf, mmr')
-    query_type: str = Field(default='factual', description='查询类型: factual, relational, temporal')
+    search_mode: str = Field(default='cross_encoder', description='搜索模式: cross_encoder, rrf, mmr, factual, temporal')
     max_facts: int = Field(default=15, description='最大结果数', ge=1, le=100)
     group_ids: list[str] | None = Field(default=None, description='组ID列表')
     reranker_min_score: float = Field(default=0.6, description='重排序最低分数', ge=0.0, le=1.0)
     sim_min_score: float = Field(default=0.5, description='相似度最低分数', ge=0.0, le=1.0)
-    use_custom_config: bool = Field(default=False, description='使用自定义配置')
     custom_limit: int | None = Field(default=None, description='自定义结果限制', ge=1, le=100)
     enable_filters: bool = Field(default=False, description='启用搜索过滤器')
     node_labels: list[str] | None = Field(default=None, description='节点标签过滤')
@@ -1503,19 +1500,16 @@ async def run_dual_servers():
             start_time = time.time()
 
             try:
-                # 选择搜索配置
-                if request.use_custom_config:
-                    # 使用查询类型特化配置
-                    config_info = QUERY_TYPE_CONFIGS.get(request.query_type)
-                    if not config_info:
-                        raise ValueError(f"无效的查询类型: {request.query_type}")
-                else:
-                    # 使用基础策略配置
-                    config_info = SEARCH_STRATEGY_CONFIGS.get(request.search_strategy)
-                    if not config_info:
-                        raise ValueError(f"无效的搜索策略: {request.search_strategy}")
+                # 调试日志
+                logger.info(f"收到高级搜索请求: search_mode={request.search_mode}, query={request.query}")
+
+                # 使用统一的搜索配置
+                config_info = UNIFIED_SEARCH_CONFIGS.get(request.search_mode)
+                if not config_info:
+                    raise ValueError(f"无效的搜索模式: {request.search_mode}")
 
                 search_config = config_info['config']
+                logger.info(f"使用搜索配置: {config_info['description']}")
 
                 # 动态调整配置参数
                 if request.custom_limit:
@@ -1555,8 +1549,8 @@ async def run_dual_servers():
                 return AdvancedSearchResponse(
                     query=request.query,
                     facts=formatted_facts,
-                    search_config=request.search_strategy if not request.use_custom_config else request.query_type,
-                    query_type=request.query_type,
+                    search_config=request.search_mode,
+                    query_type=request.search_mode,
                     total_results=len(formatted_facts),
                     config_description=config_info['description'],
                     response_time=response_time
