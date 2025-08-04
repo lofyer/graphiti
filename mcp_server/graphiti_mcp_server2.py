@@ -52,6 +52,9 @@ SEMAPHORE_LIMIT = int(os.getenv('SEMAPHORE_LIMIT', 10))
 API_SERVER_PORT = int(os.getenv('API_SERVER_PORT', 8000))
 MCP_SERVER_SSE_PORT = int(os.getenv('MCP_SERVER_SSE_PORT', 8001))
 
+# Community building configuration
+AUTO_BUILD_COMMUNITY = os.getenv('AUTO_BUILD_COMMUNITY', 'false').lower() == 'true'
+
 # Advanced Search Configurations
 # 统一的搜索配置 - 合并搜索策略和查询类型
 UNIFIED_SEARCH_CONFIGS = {
@@ -815,6 +818,9 @@ async def initialize_graphiti():
         logger.info(f"重排序配置 - Model: {config.reranker.model}, API_KEY: {'已设置' if config.reranker.api_key else '未设置'}, Base_URL: {config.reranker.base_url}")
         logger.info(f"重排序客户端: {type(reranker_client).__name__ if reranker_client else 'None'}")
 
+        # Log community building configuration
+        logger.info(f"社区构建配置 - AUTO_BUILD_COMMUNITY: {AUTO_BUILD_COMMUNITY}")
+
         # Initialize Graphiti client
         graphiti_client = Graphiti(
             uri=config.neo4j.uri,
@@ -1033,6 +1039,7 @@ async def add_memory(
                     uuid=uuid,
                     reference_time=datetime.now(timezone.utc),
                     entity_types=entity_types,
+                    update_communities=AUTO_BUILD_COMMUNITY,  # Use environment variable
                 )
                 logger.info(f"Episode '{name}' added successfully")
 
@@ -1668,6 +1675,7 @@ async def run_dual_servers():
                     reference_time=m.timestamp,
                     source=EpisodeType.message,
                     source_description=m.source_description,
+                    update_communities=AUTO_BUILD_COMMUNITY,  # Use environment variable
                 )
 
             for m in request.messages:
@@ -1713,6 +1721,103 @@ async def run_dual_servers():
             await clear_data(graphiti.driver)
             await graphiti.build_indices_and_constraints()
             return Result(message='Graph cleared', success=True)
+
+        @ingest_router.post('/build-communities', status_code=status.HTTP_200_OK)
+        async def build_communities(graphiti: SharedGraphitiDep):
+            """手动构建社区"""
+            import asyncio
+            import time
+
+            async def build_communities_task():
+                """后台任务：构建社区"""
+                try:
+                    logger.info("开始手动构建社区...")
+
+                    # 检查数据库连接
+                    try:
+                        await graphiti.driver.execute_query("MATCH (n) RETURN count(n) as total_nodes LIMIT 1")
+                        logger.info("数据库连接正常")
+                    except Exception as db_error:
+                        logger.error(f"数据库连接失败: {db_error}")
+                        return
+
+                    # 获取当前实体数量，用于估算时间
+                    from graphiti_core.nodes import EntityNode
+                    entities = await EntityNode.get_by_group_ids(graphiti.driver, None)
+                    entity_count = len(entities) if entities else 0
+                    logger.info(f"发现 {entity_count} 个实体节点")
+
+                    if entity_count == 0:
+                        logger.info("没有实体节点，跳过社区构建")
+                        return
+
+                    if entity_count < 5:
+                        logger.warning(f"实体数量较少 ({entity_count})，社区构建可能效果不佳")
+
+                    # 显示前几个实体的信息
+                    if entities:
+                        logger.info("实体样例:")
+                        for i, entity in enumerate(entities[:3]):
+                            logger.info(f"  {i+1}. {entity.name} (group_id: {entity.group_id})")
+
+                    # 检查是否有关系
+                    try:
+                        result, _, _ = await graphiti.driver.execute_query(
+                            "MATCH ()-[r:RELATES_TO]->() RETURN count(r) as relationship_count"
+                        )
+                        relationship_count = result[0]['relationship_count'] if result else 0
+                        logger.info(f"发现 {relationship_count} 个关系")
+
+                        if relationship_count == 0:
+                            logger.warning("没有发现实体间的关系，社区构建可能无法进行")
+                            return
+                    except Exception as rel_error:
+                        logger.warning(f"检查关系时出错: {rel_error}")
+
+                    logger.info("开始构建社区，这可能需要几分钟时间...")
+
+                    # 设置环境变量来增加并发度（如果LLM支持）
+                    import os
+                    original_semaphore = os.environ.get('SEMAPHORE_LIMIT')
+                    os.environ['SEMAPHORE_LIMIT'] = '20'  # 增加并发度
+
+                    try:
+                        # 开始构建社区
+                        start_time = time.time()
+                        await graphiti.build_communities()
+                        end_time = time.time()
+
+                        duration = end_time - start_time
+                        logger.info(f"社区构建完成！耗时: {duration:.2f} 秒")
+
+                        # 检查构建结果
+                        try:
+                            result, _, _ = await graphiti.driver.execute_query(
+                                "MATCH (c:Community) RETURN count(c) as community_count"
+                            )
+                            community_count = result[0]['community_count'] if result else 0
+                            logger.info(f"成功创建 {community_count} 个社区")
+                        except Exception as check_error:
+                            logger.warning(f"检查社区数量时出错: {check_error}")
+
+                    finally:
+                        # 恢复原始设置
+                        if original_semaphore:
+                            os.environ['SEMAPHORE_LIMIT'] = original_semaphore
+                        else:
+                            os.environ.pop('SEMAPHORE_LIMIT', None)
+
+                except Exception as e:
+                    logger.error(f"构建社区失败: {str(e)}")
+                    import traceback
+                    logger.error(f"详细错误信息: {traceback.format_exc()}")
+
+            # 在后台启动构建任务，不等待完成
+            task = asyncio.create_task(build_communities_task())
+
+            # 立即返回响应
+            logger.info("社区构建任务已启动，将在后台进行")
+            return Result(message='Community building task started in background', success=True)
 
         # Create a new FastAPI app without the lifespan manager
         fastapi_app = FastAPI(title="Graphiti Graph Service", version="1.0.0")
