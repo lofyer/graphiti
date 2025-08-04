@@ -310,6 +310,13 @@ class GraphitiLLMConfig(BaseModel):
         if not self.api_key:
             raise ValueError('OPENAI_API_KEY must be set when using OpenAI API')
 
+        # 打印LLM客户端配置信息
+        logger.info(f"LLM客户端配置 - Model: {self.model}, Small_Model: {self.small_model}")
+        logger.info(f"LLM客户端配置 - API_KEY: {'已设置' if self.api_key else '未设置'}")
+        logger.info(f"LLM客户端配置 - Base_URL: {self.base_url}")
+        logger.info(f"LLM客户端配置 - OpenAI_Compatible: {self.openai_compatible}")
+        logger.info(f"LLM客户端配置 - Temperature: {self.temperature}")
+
         llm_client_config = LLMConfig(
             api_key=self.api_key,
             model=self.model,
@@ -371,7 +378,14 @@ class GraphitiEmbedderConfig(BaseModel):
     def create_client(self) -> EmbedderClient | None:
         """Create an embedder client based on this configuration."""
         if not self.api_key:
+            logger.info("Embedder客户端 - 未设置API_KEY，跳过创建")
             return None
+
+        # 打印Embedder客户端配置信息
+        logger.info(f"Embedder客户端配置 - Model: {self.model}")
+        logger.info(f"Embedder客户端配置 - API_KEY: {'已设置' if self.api_key else '未设置'}")
+        logger.info(f"Embedder客户端配置 - Base_URL: {self.base_url}")
+        logger.info(f"Embedder客户端配置 - Dimension: {self.dimension}")
 
         # 根据官方文档，OpenAIEmbedderConfig 直接支持所有参数
         embedder_config = OpenAIEmbedderConfig(
@@ -381,6 +395,7 @@ class GraphitiEmbedderConfig(BaseModel):
             base_url=self.base_url,  # None 也是有效值，表示使用默认 OpenAI API
         )
 
+        logger.info(f"Embedder客户端 - 创建OpenAIEmbedder实例")
         return OpenAIEmbedder(config=embedder_config)
 
 
@@ -392,6 +407,11 @@ class StandardRerankerClient(CrossEncoderClient):
         self.api_key = api_key
         self.base_url = base_url
 
+        # 打印StandardRerankerClient配置信息
+        logger.info(f"StandardRerankerClient配置 - Model: {model}")
+        logger.info(f"StandardRerankerClient配置 - API_KEY: {'已设置' if api_key else '未设置'}")
+        logger.info(f"StandardRerankerClient配置 - Base_URL: {base_url}")
+
         # Create HTTP client for API calls
         import httpx
         self.client = httpx.AsyncClient(
@@ -402,6 +422,7 @@ class StandardRerankerClient(CrossEncoderClient):
             },
             timeout=30.0
         )
+        logger.info(f"StandardRerankerClient - 创建httpx.AsyncClient实例，base_url={base_url}")
 
     async def rank(self, query: str, passages: list[str]) -> list[tuple[str, float]]:
         """Rank passages using standard reranking API."""
@@ -450,12 +471,24 @@ class LLMBasedRerankerClient(CrossEncoderClient):
         self.api_key = api_key
         self.base_url = base_url
 
+        # 打印LLMBasedRerankerClient配置信息
+        logger.info(f"LLMBasedRerankerClient配置 - Model: {model}")
+        logger.info(f"LLMBasedRerankerClient配置 - API_KEY: {'已设置' if api_key else '未设置'}")
+        logger.info(f"LLMBasedRerankerClient配置 - Base_URL: {base_url}")
+
         # Create OpenAI client for API calls
         import openai
         self.client = openai.AsyncOpenAI(
             api_key=api_key,
             base_url=base_url
         )
+        logger.info(f"LLMBasedRerankerClient - 创建openai.AsyncOpenAI实例，base_url={base_url}")
+
+        # 检查OpenAI客户端的实际base_url
+        if hasattr(self.client, 'base_url'):
+            logger.info(f"LLMBasedRerankerClient - OpenAI客户端实际base_url: {self.client.base_url}")
+        if hasattr(self.client, '_base_url'):
+            logger.info(f"LLMBasedRerankerClient - OpenAI客户端实际_base_url: {self.client._base_url}")
 
     async def rank(self, query: str, passages: list[str]) -> list[tuple[str, float]]:
         """Rank passages using LLM-based scoring."""
@@ -537,6 +570,12 @@ class GraphitiRerankerConfig(BaseModel):
 
     def create_client(self) -> CrossEncoderClient | None:
         """Create a reranker client from the configuration."""
+        # 打印重排序器配置详细信息
+        logger.info(f"重排序器配置详情 - Type: {self.reranker_type}")
+        logger.info(f"重排序器配置详情 - Model: {self.model}")
+        logger.info(f"重排序器配置详情 - API_KEY: {'已设置' if self.api_key else '未设置'}")
+        logger.info(f"重排序器配置详情 - Base_URL: {self.base_url}")
+
         if not self.api_key:
             # No API key provided, no reranker will be used
             logger.info("No reranker API key provided, reranker disabled")
@@ -545,18 +584,22 @@ class GraphitiRerankerConfig(BaseModel):
         # Choose client based on reranker type
         if self.reranker_type == 'llm':
             logger.info("Using LLM-based reranker client")
-            return LLMBasedRerankerClient(
+            client = LLMBasedRerankerClient(
                 model=self.model,
                 api_key=self.api_key,
                 base_url=self.base_url
             )
+            logger.info(f"LLM-based reranker client created: {type(client).__name__}")
+            return client
         else:
             logger.info("Using standard reranker client")
-            return StandardRerankerClient(
+            client = StandardRerankerClient(
                 model=self.model,
                 api_key=self.api_key,
                 base_url=self.base_url
             )
+            logger.info(f"Standard reranker client created: {type(client).__name__}")
+            return client
 
     @classmethod
     def from_env(cls) -> 'GraphitiRerankerConfig':
@@ -581,6 +624,13 @@ class GraphitiRerankerConfig(BaseModel):
         else:
             # Fallback to main OpenAI API key
             api_key = os.environ.get('OPENAI_API_KEY', '').strip()
+
+        # 打印环境变量读取详情
+        logger.info(f"重排序器环境变量读取 - RERANKER_TYPE: '{reranker_type_env}' -> '{reranker_type}'")
+        logger.info(f"重排序器环境变量读取 - RERANK_MODEL_ID: '{model_env}' -> '{model}'")
+        logger.info(f"重排序器环境变量读取 - RERANK_MODEL_API_URL: '{os.environ.get('RERANK_MODEL_API_URL', '')}' -> '{base_url}'")
+        logger.info(f"重排序器环境变量读取 - RERANK_MODEL_API_KEY: {'已设置' if rerank_api_key else '未设置'}")
+        logger.info(f"重排序器环境变量读取 - OPENAI_API_KEY: {'已设置' if os.environ.get('OPENAI_API_KEY') else '未设置'}")
 
         return cls(
             model=model,
