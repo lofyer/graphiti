@@ -1742,9 +1742,9 @@ async def run_dual_servers():
                         return
 
                     # 获取当前实体数量，用于估算时间
-                    from graphiti_core.nodes import EntityNode
-                    entities = await EntityNode.get_by_group_ids(graphiti.driver, None)
-                    entity_count = len(entities) if entities else 0
+                    # 直接统计实体数量（不按 group 过滤）
+                    result, _, _ = await graphiti.driver.execute_query("MATCH (n:Entity) RETURN count(n) AS entity_count")
+                    entity_count = result[0]['entity_count'] if result else 0
                     logger.info(f"发现 {entity_count} 个实体节点")
 
                     if entity_count == 0:
@@ -1753,12 +1753,6 @@ async def run_dual_servers():
 
                     if entity_count < 5:
                         logger.warning(f"实体数量较少 ({entity_count})，社区构建可能效果不佳")
-
-                    # 显示前几个实体的信息
-                    if entities:
-                        logger.info("实体样例:")
-                        for i, entity in enumerate(entities[:3]):
-                            logger.info(f"  {i+1}. {entity.name} (group_id: {entity.group_id})")
 
                     # 检查是否有关系
                     try:
@@ -1784,7 +1778,29 @@ async def run_dual_servers():
                     try:
                         # 开始构建社区
                         start_time = time.time()
-                        await graphiti.build_communities()
+                        # 将耗时的社区构建移至线程池，避免阻塞事件循环
+                        def _run_build_sync():
+                            import asyncio as _aio
+                            from graphiti_core import Graphiti as _Graphiti
+
+                            async def _do_build():
+                                local_graphiti = _Graphiti(
+                                    uri=config.neo4j.uri,
+                                    user=config.neo4j.user,
+                                    password=config.neo4j.password,
+                                    llm_client=graphiti.llm_client,
+                                    embedder=graphiti.embedder,
+                                    cross_encoder=getattr(graphiti, 'cross_encoder', None),
+                                    max_coroutines=5,
+                                )
+                                try:
+                                    await local_graphiti.build_communities()
+                                finally:
+                                    await local_graphiti.driver.close()
+
+                            _aio.run(_do_build())
+
+                        await asyncio.to_thread(_run_build_sync)
                         end_time = time.time()
 
                         duration = end_time - start_time
