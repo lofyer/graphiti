@@ -56,38 +56,38 @@ MCP_SERVER_SSE_PORT = int(os.getenv('MCP_SERVER_SSE_PORT', 8001))
 AUTO_BUILD_COMMUNITY = os.getenv('AUTO_BUILD_COMMUNITY', 'false').lower() == 'true'
 
 # Advanced Search Configurations
-# 统一的搜索配置 - 合并搜索策略和查询类型
+# Unified search configs - combining search strategies and query types
 UNIFIED_SEARCH_CONFIGS = {
-    # 基于搜索策略的配置
+    # Strategy-based configurations
     'cross_encoder': {
         'config': COMBINED_HYBRID_SEARCH_CROSS_ENCODER,
-        'description': '交叉编码器重排序 - 最高精度，适合复杂查询',
+        'description': 'Cross-encoder reranking - highest accuracy, suitable for complex queries',
         'category': 'strategy',
         'performance': 'high_accuracy'
     },
     'rrf': {
         'config': COMBINED_HYBRID_SEARCH_RRF,
-        'description': '倒数排名融合 - 平衡性能和质量',
+        'description': 'Reciprocal Rank Fusion - balanced performance and quality',
         'category': 'strategy',
         'performance': 'balanced'
     },
     'mmr': {
         'config': COMBINED_HYBRID_SEARCH_MMR,
-        'description': '最大边际相关性 - 多样性结果',
+        'description': 'Maximal Marginal Relevance - diverse results',
         'category': 'strategy',
         'performance': 'diverse'
     },
 
-    # 基于查询类型的特化配置
+    # Query type specialized configurations
     'factual': {
         'config': EDGE_HYBRID_SEARCH_CROSS_ENCODER,
-        'description': '事实查询 - 专门用于"什么是"、"谁是"类问题',
+        'description': 'Factual queries - for "what is", "who is" type questions',
         'category': 'query_type',
         'use_case': 'factual_queries'
     },
     'temporal': {
         'config': EDGE_HYBRID_SEARCH_EPISODE_MENTIONS,
-        'description': '时间查询 - 专门用于"最近发生"、"历史变化"类问题',
+        'description': 'Temporal queries - for "recently happened", "historical changes" type questions',
         'category': 'query_type',
         'use_case': 'temporal_queries'
     }
@@ -313,12 +313,12 @@ class GraphitiLLMConfig(BaseModel):
         if not self.api_key:
             raise ValueError('OPENAI_API_KEY must be set when using OpenAI API')
 
-        # 打印LLM客户端配置信息
-        logger.info(f"LLM客户端配置 - Model: {self.model}, Small_Model: {self.small_model}")
-        logger.info(f"LLM客户端配置 - API_KEY: {'已设置' if self.api_key else '未设置'}")
-        logger.info(f"LLM客户端配置 - Base_URL: {self.base_url}")
-        logger.info(f"LLM客户端配置 - OpenAI_Compatible: {self.openai_compatible}")
-        logger.info(f"LLM客户端配置 - Temperature: {self.temperature}")
+        # Log LLM client configuration
+        logger.info(f"LLM client config - Model: {self.model}, Small_Model: {self.small_model}")
+        logger.info(f"LLM client config - API_KEY: {'set' if self.api_key else 'not set'}")
+        logger.info(f"LLM client config - Base_URL: {self.base_url}")
+        logger.info(f"LLM client config - OpenAI_Compatible: {self.openai_compatible}")
+        logger.info(f"LLM client config - Temperature: {self.temperature}")
 
         llm_client_config = LLMConfig(
             api_key=self.api_key,
@@ -381,14 +381,14 @@ class GraphitiEmbedderConfig(BaseModel):
     def create_client(self) -> EmbedderClient | None:
         """Create an embedder client based on this configuration."""
         if not self.api_key:
-            logger.info("Embedder客户端 - 未设置API_KEY，跳过创建")
+            logger.info("Embedder client - API_KEY not set, skipping creation")
             return None
 
-        # 打印Embedder客户端配置信息
-        logger.info(f"Embedder客户端配置 - Model: {self.model}")
-        logger.info(f"Embedder客户端配置 - API_KEY: {'已设置' if self.api_key else '未设置'}")
-        logger.info(f"Embedder客户端配置 - Base_URL: {self.base_url}")
-        logger.info(f"Embedder客户端配置 - Dimension: {self.dimension}")
+        # Log Embedder client configuration
+        logger.info(f"Embedder client config - Model: {self.model}")
+        logger.info(f"Embedder client config - API_KEY: {'set' if self.api_key else 'not set'}")
+        logger.info(f"Embedder client config - Base_URL: {self.base_url}")
+        logger.info(f"Embedder client config - Dimension: {self.dimension}")
 
         # 根据官方文档，OpenAIEmbedderConfig 直接支持所有参数
         embedder_config = OpenAIEmbedderConfig(
@@ -398,7 +398,7 @@ class GraphitiEmbedderConfig(BaseModel):
             base_url=self.base_url,  # None 也是有效值，表示使用默认 OpenAI API
         )
 
-        logger.info(f"Embedder客户端 - 创建OpenAIEmbedder实例")
+        logger.info(f"Embedder client - creating OpenAIEmbedder instance")
         return OpenAIEmbedder(config=embedder_config)
 
 
@@ -410,10 +410,10 @@ class StandardRerankerClient(CrossEncoderClient):
         self.api_key = api_key
         self.base_url = base_url
 
-        # 打印StandardRerankerClient配置信息
-        logger.info(f"StandardRerankerClient配置 - Model: {model}")
-        logger.info(f"StandardRerankerClient配置 - API_KEY: {'已设置' if api_key else '未设置'}")
-        logger.info(f"StandardRerankerClient配置 - Base_URL: {base_url}")
+        # Log StandardRerankerClient configuration
+        logger.info(f"StandardRerankerClient config - Model: {model}")
+        logger.info(f"StandardRerankerClient config - API_KEY: {'set' if api_key else 'not set'}")
+        logger.info(f"StandardRerankerClient config - Base_URL: {base_url}")
 
         # Create HTTP client for API calls
         import httpx
@@ -425,7 +425,7 @@ class StandardRerankerClient(CrossEncoderClient):
             },
             timeout=30.0
         )
-        logger.info(f"StandardRerankerClient - 创建httpx.AsyncClient实例，base_url={base_url}")
+        logger.info(f"StandardRerankerClient - creating httpx.AsyncClient instance, base_url={base_url}")
 
     async def rank(self, query: str, passages: list[str]) -> list[tuple[str, float]]:
         """Rank passages using standard reranking API."""
@@ -474,10 +474,10 @@ class LLMBasedRerankerClient(CrossEncoderClient):
         self.api_key = api_key
         self.base_url = base_url
 
-        # 打印LLMBasedRerankerClient配置信息
-        logger.info(f"LLMBasedRerankerClient配置 - Model: {model}")
-        logger.info(f"LLMBasedRerankerClient配置 - API_KEY: {'已设置' if api_key else '未设置'}")
-        logger.info(f"LLMBasedRerankerClient配置 - Base_URL: {base_url}")
+        # Log LLMBasedRerankerClient configuration
+        logger.info(f"LLMBasedRerankerClient config - Model: {model}")
+        logger.info(f"LLMBasedRerankerClient config - API_KEY: {'set' if api_key else 'not set'}")
+        logger.info(f"LLMBasedRerankerClient config - Base_URL: {base_url}")
 
         # Create OpenAI client for API calls
         import openai
@@ -485,13 +485,12 @@ class LLMBasedRerankerClient(CrossEncoderClient):
             api_key=api_key,
             base_url=base_url
         )
-        logger.info(f"LLMBasedRerankerClient - 创建openai.AsyncOpenAI实例，base_url={base_url}")
+        logger.info(f"LLMBasedRerankerClient - creating openai.AsyncOpenAI instance, base_url={base_url}")
 
-        # 检查OpenAI客户端的实际base_url
         if hasattr(self.client, 'base_url'):
-            logger.info(f"LLMBasedRerankerClient - OpenAI客户端实际base_url: {self.client.base_url}")
+            logger.info(f"LLMBasedRerankerClient - OpenAI client actual base_url: {self.client.base_url}")
         if hasattr(self.client, '_base_url'):
-            logger.info(f"LLMBasedRerankerClient - OpenAI客户端实际_base_url: {self.client._base_url}")
+            logger.info(f"LLMBasedRerankerClient - OpenAI client actual _base_url: {self.client._base_url}")
 
     async def rank(self, query: str, passages: list[str]) -> list[tuple[str, float]]:
         """Rank passages using LLM-based scoring."""
@@ -573,11 +572,11 @@ class GraphitiRerankerConfig(BaseModel):
 
     def create_client(self) -> CrossEncoderClient | None:
         """Create a reranker client from the configuration."""
-        # 打印重排序器配置详细信息
-        logger.info(f"重排序器配置详情 - Type: {self.reranker_type}")
-        logger.info(f"重排序器配置详情 - Model: {self.model}")
-        logger.info(f"重排序器配置详情 - API_KEY: {'已设置' if self.api_key else '未设置'}")
-        logger.info(f"重排序器配置详情 - Base_URL: {self.base_url}")
+        # Log reranker configuration details
+        logger.info(f"Reranker config details - Type: {self.reranker_type}")
+        logger.info(f"Reranker config details - Model: {self.model}")
+        logger.info(f"Reranker config details - API_KEY: {'set' if self.api_key else 'not set'}")
+        logger.info(f"Reranker config details - Base_URL: {self.base_url}")
 
         if not self.api_key:
             # No API key provided, no reranker will be used
@@ -628,12 +627,12 @@ class GraphitiRerankerConfig(BaseModel):
             # Fallback to main OpenAI API key
             api_key = os.environ.get('OPENAI_API_KEY', '').strip()
 
-        # 打印环境变量读取详情
-        logger.info(f"重排序器环境变量读取 - RERANKER_TYPE: '{reranker_type_env}' -> '{reranker_type}'")
-        logger.info(f"重排序器环境变量读取 - RERANK_MODEL_ID: '{model_env}' -> '{model}'")
-        logger.info(f"重排序器环境变量读取 - RERANK_MODEL_API_URL: '{os.environ.get('RERANK_MODEL_API_URL', '')}' -> '{base_url}'")
-        logger.info(f"重排序器环境变量读取 - RERANK_MODEL_API_KEY: {'已设置' if rerank_api_key else '未设置'}")
-        logger.info(f"重排序器环境变量读取 - OPENAI_API_KEY: {'已设置' if os.environ.get('OPENAI_API_KEY') else '未设置'}")
+        # Log environment variable reading details
+        logger.info(f"Reranker env vars - RERANKER_TYPE: '{reranker_type_env}' -> '{reranker_type}'")
+        logger.info(f"Reranker env vars - RERANK_MODEL_ID: '{model_env}' -> '{model}'")
+        logger.info(f"Reranker env vars - RERANK_MODEL_API_URL: '{os.environ.get('RERANK_MODEL_API_URL', '')}' -> '{base_url}'")
+        logger.info(f"Reranker env vars - RERANK_MODEL_API_KEY: {'set' if rerank_api_key else 'not set'}")
+        logger.info(f"Reranker env vars - OPENAI_API_KEY: {'set' if os.environ.get('OPENAI_API_KEY') else 'not set'}")
 
         return cls(
             model=model,
@@ -720,28 +719,28 @@ class MCPConfig(BaseModel):
 class AdvancedSearchRequest(BaseModel):
     """Request model for advanced search functionality."""
 
-    query: str = Field(..., description='查询内容')
-    search_mode: str = Field(default='cross_encoder', description='搜索模式: cross_encoder, rrf, mmr, factual, temporal')
-    max_facts: int = Field(default=15, description='最大结果数', ge=1, le=100)
-    group_ids: list[str] | None = Field(default=None, description='组ID列表')
-    reranker_min_score: float = Field(default=0.6, description='重排序最低分数', ge=0.0, le=1.0)
-    sim_min_score: float = Field(default=0.5, description='相似度最低分数', ge=0.0, le=1.0)
-    custom_limit: int | None = Field(default=None, description='自定义结果限制', ge=1, le=100)
-    enable_filters: bool = Field(default=False, description='启用搜索过滤器')
-    node_labels: list[str] | None = Field(default=None, description='节点标签过滤')
-    edge_types: list[str] | None = Field(default=None, description='边类型过滤')
+    query: str = Field(..., description='Query content')
+    search_mode: str = Field(default='cross_encoder', description='Search mode: cross_encoder, rrf, mmr, factual, temporal')
+    max_facts: int = Field(default=15, description='Maximum number of results', ge=1, le=100)
+    group_ids: list[str] | None = Field(default=None, description='Group ID list')
+    reranker_min_score: float = Field(default=0.6, description='Reranker minimum score', ge=0.0, le=1.0)
+    sim_min_score: float = Field(default=0.5, description='Similarity minimum score', ge=0.0, le=1.0)
+    custom_limit: int | None = Field(default=None, description='Custom result limit', ge=1, le=100)
+    enable_filters: bool = Field(default=False, description='Enable search filters')
+    node_labels: list[str] | None = Field(default=None, description='Node label filter')
+    edge_types: list[str] | None = Field(default=None, description='Edge type filter')
 
 
 class AdvancedSearchResponse(BaseModel):
     """Response model for advanced search functionality."""
 
-    query: str = Field(..., description='原始查询')
-    facts: list[dict] = Field(..., description='搜索结果事实列表')
-    search_config: str = Field(..., description='使用的搜索配置')
-    query_type: str = Field(..., description='查询类型')
-    total_results: int = Field(..., description='结果总数')
-    config_description: str = Field(..., description='配置描述')
-    response_time: float | None = Field(default=None, description='响应时间（秒）')
+    query: str = Field(..., description='Original query')
+    facts: list[dict] = Field(..., description='Search result facts list')
+    search_config: str = Field(..., description='Search configuration used')
+    query_type: str = Field(..., description='Query type')
+    total_results: int = Field(..., description='Total number of results')
+    config_description: str = Field(..., description='Configuration description')
+    response_time: float | None = Field(default=None, description='Response time (seconds)')
 
 
 # Configure logging
@@ -787,9 +786,11 @@ API keys are provided for any language model operations.
 """
 
 # MCP server instance
+# Allow external access by disabling host validation
 mcp = FastMCP(
     'Graphiti Agent Memory',
     instructions=GRAPHITI_MCP_INSTRUCTIONS,
+    host="0.0.0.0",
 )
 
 # Initialize Graphiti client
@@ -815,11 +816,11 @@ async def initialize_graphiti():
 
         # Create reranker client if configured
         reranker_client = config.reranker.create_client()
-        logger.info(f"重排序配置 - Model: {config.reranker.model}, API_KEY: {'已设置' if config.reranker.api_key else '未设置'}, Base_URL: {config.reranker.base_url}")
-        logger.info(f"重排序客户端: {type(reranker_client).__name__ if reranker_client else 'None'}")
+        logger.info(f"Reranker config - Model: {config.reranker.model}, API_KEY: {'set' if config.reranker.api_key else 'not set'}, Base_URL: {config.reranker.base_url}")
+        logger.info(f"Reranker client: {type(reranker_client).__name__ if reranker_client else 'None'}")
 
         # Log community building configuration
-        logger.info(f"社区构建配置 - AUTO_BUILD_COMMUNITY: {AUTO_BUILD_COMMUNITY}")
+        logger.info(f"Community building config - AUTO_BUILD_COMMUNITY: {AUTO_BUILD_COMMUNITY}")
 
         # Initialize Graphiti client
         graphiti_client = Graphiti(
@@ -1552,21 +1553,21 @@ async def run_dual_servers():
 
         @retrieve_router.post('/search_advanced', status_code=status.HTTP_200_OK)
         async def search_advanced(request: AdvancedSearchRequest, graphiti: SharedGraphitiDep):
-            """高级搜索端点，支持多种搜索策略和查询类型"""
+            """Advanced search endpoint supporting multiple search strategies and query types"""
             import time
             start_time = time.time()
 
             try:
-                # 调试日志
-                logger.info(f"收到高级搜索请求: search_mode={request.search_mode}, query={request.query}")
+                # Debug logging
+                logger.info(f"Received advanced search request: search_mode={request.search_mode}, query={request.query}")
 
-                # 使用统一的搜索配置
+                # Use unified search configuration
                 config_info = UNIFIED_SEARCH_CONFIGS.get(request.search_mode)
                 if not config_info:
-                    raise ValueError(f"无效的搜索模式: {request.search_mode}")
+                    raise ValueError(f"Invalid search mode: {request.search_mode}")
 
                 search_config = config_info['config']
-                logger.info(f"使用搜索配置: {config_info['description']}")
+                logger.info(f"Using search config: {config_info['description']}")
 
                 # 动态调整配置参数
                 if request.custom_limit:
@@ -1614,8 +1615,8 @@ async def run_dual_servers():
                 )
 
             except Exception as e:
-                logger.error(f"高级搜索失败: {e}")
-                raise HTTPException(status_code=500, detail=f"搜索失败: {str(e)}")
+                logger.error(f"Advanced search failed: {e}")
+                raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
 
         @retrieve_router.get('/entity-edge/{uuid}', status_code=status.HTTP_200_OK)
         async def get_entity_edge(uuid: str, graphiti: SharedGraphitiDep):
@@ -1724,61 +1725,61 @@ async def run_dual_servers():
 
         @ingest_router.post('/build-communities', status_code=status.HTTP_200_OK)
         async def build_communities(graphiti: SharedGraphitiDep):
-            """手动构建社区"""
+            """Manually build communities"""
             import asyncio
             import time
 
             async def build_communities_task():
-                """后台任务：构建社区"""
+                """Background task: build communities"""
                 try:
-                    logger.info("开始手动构建社区...")
+                    logger.info("Starting manual community building...")
 
-                    # 检查数据库连接
+                    # Check database connection
                     try:
                         await graphiti.driver.execute_query("MATCH (n) RETURN count(n) as total_nodes LIMIT 1")
-                        logger.info("数据库连接正常")
+                        logger.info("Database connection OK")
                     except Exception as db_error:
-                        logger.error(f"数据库连接失败: {db_error}")
+                        logger.error(f"Database connection failed: {db_error}")
                         return
 
-                    # 获取当前实体数量，用于估算时间
-                    # 直接统计实体数量（不按 group 过滤）
+                    # Get current entity count for time estimation
+                    # Count entities directly (without group filter)
                     result, _, _ = await graphiti.driver.execute_query("MATCH (n:Entity) RETURN count(n) AS entity_count")
                     entity_count = result[0]['entity_count'] if result else 0
-                    logger.info(f"发现 {entity_count} 个实体节点")
+                    logger.info(f"Found {entity_count} entity nodes")
 
                     if entity_count == 0:
-                        logger.info("没有实体节点，跳过社区构建")
+                        logger.info("No entity nodes found, skipping community building")
                         return
 
                     if entity_count < 5:
-                        logger.warning(f"实体数量较少 ({entity_count})，社区构建可能效果不佳")
+                        logger.warning(f"Entity count is low ({entity_count}), community building may not be effective")
 
-                    # 检查是否有关系
+                    # Check for relationships
                     try:
                         result, _, _ = await graphiti.driver.execute_query(
                             "MATCH ()-[r:RELATES_TO]->() RETURN count(r) as relationship_count"
                         )
                         relationship_count = result[0]['relationship_count'] if result else 0
-                        logger.info(f"发现 {relationship_count} 个关系")
+                        logger.info(f"Found {relationship_count} relationships")
 
                         if relationship_count == 0:
-                            logger.warning("没有发现实体间的关系，社区构建可能无法进行")
+                            logger.warning("No relationships found between entities, community building may not proceed")
                             return
                     except Exception as rel_error:
-                        logger.warning(f"检查关系时出错: {rel_error}")
+                        logger.warning(f"Error checking relationships: {rel_error}")
 
-                    logger.info("开始构建社区，这可能需要几分钟时间...")
+                    logger.info("Starting community building, this may take a few minutes...")
 
-                    # 设置环境变量来增加并发度（如果LLM支持）
+                    # Set environment variable to increase concurrency (if LLM supports it)
                     import os
                     original_semaphore = os.environ.get('SEMAPHORE_LIMIT')
-                    os.environ['SEMAPHORE_LIMIT'] = '20'  # 增加并发度
+                    os.environ['SEMAPHORE_LIMIT'] = '20'  # Increase concurrency
 
                     try:
-                        # 开始构建社区
+                        # Start building communities
                         start_time = time.time()
-                        # 将耗时的社区构建移至线程池，避免阻塞事件循环
+                        # Move time-consuming community building to thread pool to avoid blocking event loop
                         def _run_build_sync():
                             import asyncio as _aio
                             from graphiti_core import Graphiti as _Graphiti
@@ -1804,35 +1805,35 @@ async def run_dual_servers():
                         end_time = time.time()
 
                         duration = end_time - start_time
-                        logger.info(f"社区构建完成！耗时: {duration:.2f} 秒")
+                        logger.info(f"Community building completed! Duration: {duration:.2f} seconds")
 
-                        # 检查构建结果
+                        # Check build results
                         try:
                             result, _, _ = await graphiti.driver.execute_query(
                                 "MATCH (c:Community) RETURN count(c) as community_count"
                             )
                             community_count = result[0]['community_count'] if result else 0
-                            logger.info(f"成功创建 {community_count} 个社区")
+                            logger.info(f"Successfully created {community_count} communities")
                         except Exception as check_error:
-                            logger.warning(f"检查社区数量时出错: {check_error}")
+                            logger.warning(f"Error checking community count: {check_error}")
 
                     finally:
-                        # 恢复原始设置
+                        # Restore original settings
                         if original_semaphore:
                             os.environ['SEMAPHORE_LIMIT'] = original_semaphore
                         else:
                             os.environ.pop('SEMAPHORE_LIMIT', None)
 
                 except Exception as e:
-                    logger.error(f"构建社区失败: {str(e)}")
+                    logger.error(f"Community building failed: {str(e)}")
                     import traceback
-                    logger.error(f"详细错误信息: {traceback.format_exc()}")
+                    logger.error(f"Detailed error: {traceback.format_exc()}")
 
-            # 在后台启动构建任务，不等待完成
+            # Start build task in background, don't wait for completion
             task = asyncio.create_task(build_communities_task())
 
-            # 立即返回响应
-            logger.info("社区构建任务已启动，将在后台进行")
+            # Return response immediately
+            logger.info("Community building task started, will run in background")
             return Result(message='Community building task started in background', success=True)
 
         # Create a new FastAPI app without the lifespan manager
