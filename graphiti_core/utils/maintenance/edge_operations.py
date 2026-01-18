@@ -29,21 +29,24 @@ from graphiti_core.edges import (
     create_entity_edge_embeddings,
 )
 from graphiti_core.graphiti_types import GraphitiClients
-from graphiti_core.helpers import MAX_REFLEXION_ITERATIONS, semaphore_gather
+from graphiti_core.helpers import semaphore_gather
 from graphiti_core.llm_client import LLMClient
 from graphiti_core.llm_client.config import ModelSize
 from graphiti_core.nodes import CommunityNode, EntityNode, EpisodicNode
 from graphiti_core.prompts import prompt_library
 from graphiti_core.prompts.dedupe_edges import EdgeDuplicate
-from graphiti_core.prompts.extract_edges import ExtractedEdges, MissingFacts
+from graphiti_core.prompts.extract_edges import Edge as ExtractedEdge
+from graphiti_core.prompts.extract_edges import ExtractedEdges
 from graphiti_core.search.search import search
 from graphiti_core.search.search_config import SearchResults
 from graphiti_core.search.search_config_recipes import EDGE_HYBRID_SEARCH_RRF
 from graphiti_core.search.search_filters import SearchFilters
+from graphiti_core.utils.content_chunking import generate_covering_chunks
 from graphiti_core.utils.datetime_utils import ensure_utc, utc_now
 from graphiti_core.utils.maintenance.dedup_helpers import _normalize_string_exact
 
 DEFAULT_EDGE_NAME = 'RELATES_TO'
+MAX_NODES = 15
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +97,7 @@ async def extract_edges(
     edge_type_map: dict[tuple[str, str], list[str]],
     group_id: str = '',
     edge_types: dict[str, type[BaseModel]] | None = None,
+    custom_extraction_instructions: str | None = None,
 ) -> list[EntityEdge]:
     start = time()
 
@@ -119,22 +123,47 @@ async def extract_edges(
         else []
     )
 
-    # Prepare context for LLM
-    context = {
-        'episode_content': episode.content,
-        'nodes': [
-            {'id': idx, 'name': node.name, 'entity_types': node.labels}
-            for idx, node in enumerate(nodes)
-        ],
-        'previous_episodes': [ep.content for ep in previous_episodes],
-        'reference_time': episode.valid_at,
-        'edge_types': edge_types_context,
-        'custom_prompt': '',
-    }
+    # Generate covering chunks to ensure all node pairs are processed.
+    # Uses a greedy approach based on the Handshake Flights Problem.
+    covering_chunks = generate_covering_chunks(nodes, MAX_NODES)
 
-    facts_missed = True
-    reflexion_iterations = 0
-    while facts_missed and reflexion_iterations <= MAX_REFLEXION_ITERATIONS:
+    # Pre-assign pairs to chunks to avoid duplicate edge extraction.
+    # Each pair is assigned to the first chunk that contains it.
+    processed_pairs: set[frozenset[int]] = set()
+    chunk_assigned_pairs: list[set[frozenset[int]]] = []
+
+    for _, global_indices in covering_chunks:
+        assigned_pairs: set[frozenset[int]] = set()
+        for i, idx_i in enumerate(global_indices):
+            for idx_j in global_indices[i + 1 :]:
+                pair = frozenset([idx_i, idx_j])
+                if pair not in processed_pairs:
+                    processed_pairs.add(pair)
+                    assigned_pairs.add(pair)
+        chunk_assigned_pairs.append(assigned_pairs)
+
+    async def extract_edges_for_chunk(
+        chunk: list[EntityNode],
+        global_indices: list[int],
+        assigned_pairs: set[frozenset[int]],
+    ) -> list[ExtractedEdge]:
+        # Skip chunks with no assigned pairs (all pairs already processed)
+        if not assigned_pairs:
+            return []
+
+        # Prepare context for LLM
+        context = {
+            'episode_content': episode.content,
+            'nodes': [
+                {'id': idx, 'name': node.name, 'entity_types': node.labels}
+                for idx, node in enumerate(chunk)
+            ],
+            'previous_episodes': [ep.content for ep in previous_episodes],
+            'reference_time': episode.valid_at,
+            'edge_types': edge_types_context,
+            'custom_extraction_instructions': custom_extraction_instructions or '',
+        }
+
         llm_response = await llm_client.generate_response(
             prompt_library.extract_edges.edge(context),
             response_model=ExtractedEdges,
@@ -142,29 +171,62 @@ async def extract_edges(
             group_id=group_id,
             prompt_name='extract_edges.edge',
         )
-        edges_data = ExtractedEdges(**llm_response).edges
+        chunk_edges_data = ExtractedEdges(**llm_response).edges
 
-        context['extracted_facts'] = [edge_data.fact for edge_data in edges_data]
+        # Map chunk-local indices to global indices in the original nodes list
+        # Note: global_indices are guaranteed valid by generate_covering_chunks,
+        # but LLM-returned local indices need validation
+        valid_edges: list[ExtractedEdge] = []
+        chunk_size = len(global_indices)
 
-        reflexion_iterations += 1
-        if reflexion_iterations < MAX_REFLEXION_ITERATIONS:
-            reflexion_response = await llm_client.generate_response(
-                prompt_library.extract_edges.reflexion(context),
-                response_model=MissingFacts,
-                max_tokens=extract_edges_max_tokens,
-                group_id=group_id,
-                prompt_name='extract_edges.reflexion',
-            )
+        for edge_data in chunk_edges_data:
+            source_local_idx = edge_data.source_entity_id
+            target_local_idx = edge_data.target_entity_id
 
-            missing_facts = reflexion_response.get('missing_facts', [])
+            # Validate LLM-returned indices are within chunk bounds
+            if not (0 <= source_local_idx < chunk_size):
+                logger.warning(
+                    f'Source index {source_local_idx} out of bounds for chunk of size '
+                    f'{chunk_size} in edge {edge_data.relation_type}'
+                )
+                continue
 
-            custom_prompt = 'The following facts were missed in a previous extraction: '
-            for fact in missing_facts:
-                custom_prompt += f'\n{fact},'
+            if not (0 <= target_local_idx < chunk_size):
+                logger.warning(
+                    f'Target index {target_local_idx} out of bounds for chunk of size '
+                    f'{chunk_size} in edge {edge_data.relation_type}'
+                )
+                continue
 
-            context['custom_prompt'] = custom_prompt
+            # Map to global indices (guaranteed valid by generate_covering_chunks)
+            mapped_source = global_indices[source_local_idx]
+            mapped_target = global_indices[target_local_idx]
+            edge_data.source_entity_id = mapped_source
+            edge_data.target_entity_id = mapped_target
 
-            facts_missed = len(missing_facts) != 0
+            # Only include edges for pairs assigned to this chunk
+            edge_pair = frozenset([mapped_source, mapped_target])
+            if edge_pair in assigned_pairs:
+                valid_edges.append(edge_data)
+
+        return valid_edges
+
+    # Extract edges from all chunks in parallel
+    chunk_results: list[list[ExtractedEdge]] = list(
+        await semaphore_gather(
+            *[
+                extract_edges_for_chunk(chunk, global_indices, assigned_pairs)
+                for (chunk, global_indices), assigned_pairs in zip(
+                    covering_chunks, chunk_assigned_pairs, strict=True
+                )
+            ]
+        )
+    )
+
+    # Combine results from all chunks
+    edges_data: list[ExtractedEdge] = []
+    for chunk_edges in chunk_results:
+        edges_data.extend(chunk_edges)
 
     end = time()
     logger.debug(f'Extracted new edges: {edges_data} in {(end - start) * 1000} ms')
@@ -185,22 +247,9 @@ async def extract_edges(
         if not edge_data.fact.strip():
             continue
 
-        source_node_idx = edge_data.source_entity_id
-        target_node_idx = edge_data.target_entity_id
-
-        if len(nodes) == 0:
-            logger.warning('No entities provided for edge extraction')
-            continue
-
-        if not (0 <= source_node_idx < len(nodes) and 0 <= target_node_idx < len(nodes)):
-            logger.warning(
-                f'Invalid entity IDs in edge extraction for {edge_data.relation_type}. '
-                f'source_entity_id: {source_node_idx}, target_entity_id: {target_node_idx}, '
-                f'but only {len(nodes)} entities available (valid range: 0-{len(nodes) - 1})'
-            )
-            continue
-        source_node_uuid = nodes[source_node_idx].uuid
-        target_node_uuid = nodes[target_node_idx].uuid
+        # Indices already validated in extract_edges_for_chunk
+        source_node_uuid = nodes[edge_data.source_entity_id].uuid
+        target_node_uuid = nodes[edge_data.target_entity_id].uuid
 
         if valid_at:
             try:
@@ -312,6 +361,20 @@ async def resolve_extracted_edges(
 
     # Build entity hash table
     uuid_entity_map: dict[str, EntityNode] = {entity.uuid: entity for entity in entities}
+
+    # Collect all node UUIDs referenced by edges that are not in the entities list
+    referenced_node_uuids = set()
+    for extracted_edge in extracted_edges:
+        if extracted_edge.source_node_uuid not in uuid_entity_map:
+            referenced_node_uuids.add(extracted_edge.source_node_uuid)
+        if extracted_edge.target_node_uuid not in uuid_entity_map:
+            referenced_node_uuids.add(extracted_edge.target_node_uuid)
+
+    # Fetch missing nodes from the database
+    if referenced_node_uuids:
+        missing_nodes = await EntityNode.get_by_uuids(driver, list(referenced_node_uuids))
+        for node in missing_nodes:
+            uuid_entity_map[node.uuid] = node
 
     # Determine which edge types are relevant for each edge.
     # `edge_types_lst` stores the subset of custom edge definitions whose
