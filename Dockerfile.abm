@@ -35,6 +35,9 @@ COPY ./graphiti_core ./graphiti_core
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --index-url ${PIP_INDEX_URL} --trusted-host ${PIP_TRUSTED_HOST} .
 
+# Overwrite OpenAI embedder with ABM-compatible version (DashScope batch size limit fix)
+COPY ./graphiti_core/embedder/openai_abm.py ./graphiti_core/embedder/openai.py
+
 # Install additional dependencies for MCP server and Graph service
 RUN pip install --index-url ${PIP_INDEX_URL} --trusted-host ${PIP_TRUSTED_HOST} \
     graphiti-core \

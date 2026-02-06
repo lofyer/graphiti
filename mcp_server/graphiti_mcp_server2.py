@@ -55,6 +55,9 @@ MCP_SERVER_SSE_PORT = int(os.getenv('MCP_SERVER_SSE_PORT', 8001))
 # Community building configuration
 AUTO_BUILD_COMMUNITY = os.getenv('AUTO_BUILD_COMMUNITY', 'false').lower() == 'true'
 
+# Community search configuration - whether to return community summaries in search results
+RETURN_COMMUNITY_SUMMARIES = os.getenv('RETURN_COMMUNITY_SUMMARIES', 'false').lower() == 'true'
+
 # Advanced Search Configurations
 # Unified search configs - combining search strategies and query types
 UNIFIED_SEARCH_CONFIGS = {
@@ -196,11 +199,13 @@ class NodeResult(TypedDict):
 class NodeSearchResponse(TypedDict):
     message: str
     nodes: list[NodeResult]
+    communities: list[dict[str, Any]]  # Community summaries (if available)
 
 
 class FactSearchResponse(TypedDict):
     message: str
     facts: list[dict[str, Any]]
+    communities: list[dict[str, Any]]  # Community summaries (if available)
 
 
 class EpisodeSearchResponse(TypedDict):
@@ -1084,6 +1089,7 @@ async def search_memory_nodes(
 ) -> NodeSearchResponse | ErrorResponse:
     """Search the graph memory for relevant node summaries.
     These contain a summary of all of a node's relationships with other nodes.
+    Also returns community summaries if RETURN_COMMUNITY_SUMMARIES is enabled.
 
     Note: entity is a single entity type to filter results (permitted: "Preference", "Procedure").
 
@@ -1105,13 +1111,6 @@ async def search_memory_nodes(
             group_ids if group_ids is not None else [config.group_id] if config.group_id else []
         )
 
-        # Configure the search
-        if center_node_uuid is not None:
-            search_config = NODE_HYBRID_SEARCH_NODE_DISTANCE.model_copy(deep=True)
-        else:
-            search_config = NODE_HYBRID_SEARCH_RRF.model_copy(deep=True)
-        search_config.limit = max_nodes
-
         filters = SearchFilters()
         if entity != '':
             filters.node_labels = [entity]
@@ -1122,33 +1121,93 @@ async def search_memory_nodes(
         # Use cast to help the type checker understand that graphiti_client is not None
         client = cast(Graphiti, graphiti_client)
 
-        # Perform the search using the _search method
-        search_results = await client._search(
-            query=query,
-            config=search_config,
-            group_ids=effective_group_ids,
-            center_node_uuid=center_node_uuid,
-            search_filter=filters,
-        )
+        # Choose search method based on RETURN_COMMUNITY_SUMMARIES setting
+        if RETURN_COMMUNITY_SUMMARIES:
+            # Use combined search config to include communities
+            if center_node_uuid is not None:
+                search_config = COMBINED_HYBRID_SEARCH_RRF.model_copy(deep=True)
+            else:
+                search_config = COMBINED_HYBRID_SEARCH_RRF.model_copy(deep=True)
+            search_config.limit = max_nodes
 
-        if not search_results.nodes:
-            return NodeSearchResponse(message='No relevant nodes found', nodes=[])
+            # Perform the search using the _search method
+            search_results = await client._search(
+                query=query,
+                config=search_config,
+                group_ids=effective_group_ids,
+                center_node_uuid=center_node_uuid,
+                search_filter=filters,
+            )
 
-        # Format the node results
-        formatted_nodes: list[NodeResult] = [
-            {
-                'uuid': node.uuid,
-                'name': node.name,
-                'summary': node.summary if hasattr(node, 'summary') else '',
-                'labels': node.labels if hasattr(node, 'labels') else [],
-                'group_id': node.group_id,
-                'created_at': node.created_at.isoformat(),
-                'attributes': node.attributes if hasattr(node, 'attributes') else {},
-            }
-            for node in search_results.nodes
-        ]
+            if not search_results.nodes and not search_results.communities:
+                return NodeSearchResponse(message='No relevant nodes or communities found', nodes=[], communities=[])
 
-        return NodeSearchResponse(message='Nodes retrieved successfully', nodes=formatted_nodes)
+            # Format the node results
+            formatted_nodes: list[NodeResult] = [
+                {
+                    'uuid': node.uuid,
+                    'name': node.name,
+                    'summary': node.summary if hasattr(node, 'summary') else '',
+                    'labels': node.labels if hasattr(node, 'labels') else [],
+                    'group_id': node.group_id,
+                    'created_at': node.created_at.isoformat(),
+                    'attributes': node.attributes if hasattr(node, 'attributes') else {},
+                }
+                for node in search_results.nodes
+            ]
+
+            # Format community results
+            formatted_communities = [
+                {
+                    'uuid': community.uuid,
+                    'name': community.name,
+                    'summary': community.summary if hasattr(community, 'summary') else '',
+                    'group_id': community.group_id,
+                    'created_at': community.created_at.isoformat() if hasattr(community, 'created_at') else None,
+                }
+                for community in search_results.communities
+            ] if search_results.communities else []
+
+            return NodeSearchResponse(
+                message='Nodes retrieved successfully', 
+                nodes=formatted_nodes,
+                communities=formatted_communities
+            )
+        else:
+            # Original implementation without communities
+            if center_node_uuid is not None:
+                search_config = NODE_HYBRID_SEARCH_NODE_DISTANCE.model_copy(deep=True)
+            else:
+                search_config = NODE_HYBRID_SEARCH_RRF.model_copy(deep=True)
+            search_config.limit = max_nodes
+
+            # Perform the search using the _search method
+            search_results = await client._search(
+                query=query,
+                config=search_config,
+                group_ids=effective_group_ids,
+                center_node_uuid=center_node_uuid,
+                search_filter=filters,
+            )
+
+            if not search_results.nodes:
+                return NodeSearchResponse(message='No relevant nodes found', nodes=[], communities=[])
+
+            # Format the node results
+            formatted_nodes: list[NodeResult] = [
+                {
+                    'uuid': node.uuid,
+                    'name': node.name,
+                    'summary': node.summary if hasattr(node, 'summary') else '',
+                    'labels': node.labels if hasattr(node, 'labels') else [],
+                    'group_id': node.group_id,
+                    'created_at': node.created_at.isoformat(),
+                    'attributes': node.attributes if hasattr(node, 'attributes') else {},
+                }
+                for node in search_results.nodes
+            ]
+
+            return NodeSearchResponse(message='Nodes retrieved successfully', nodes=formatted_nodes, communities=[])
     except Exception as e:
         error_msg = str(e)
         logger.error(f'Error searching nodes: {error_msg}')
@@ -1163,6 +1222,7 @@ async def search_memory_facts(
     center_node_uuid: str | None = None,
 ) -> FactSearchResponse | ErrorResponse:
     """Search the graph memory for relevant facts.
+    Also returns community summaries if RETURN_COMMUNITY_SUMMARIES is enabled.
 
     Args:
         query: The search query
@@ -1191,18 +1251,57 @@ async def search_memory_facts(
         # Use cast to help the type checker understand that graphiti_client is not None
         client = cast(Graphiti, graphiti_client)
 
-        relevant_edges = await client.search(
-            group_ids=effective_group_ids,
-            query=query,
-            num_results=max_facts,
-            center_node_uuid=center_node_uuid,
-        )
+        # Choose search method based on RETURN_COMMUNITY_SUMMARIES setting
+        if RETURN_COMMUNITY_SUMMARIES:
+            # Use combined search config to include communities
+            search_config = COMBINED_HYBRID_SEARCH_RRF.model_copy(deep=True)
+            search_config.limit = max_facts
 
-        if not relevant_edges:
-            return FactSearchResponse(message='No relevant facts found', facts=[])
+            # Use _search method to get both edges and communities
+            search_results = await client._search(
+                query=query,
+                config=search_config,
+                group_ids=effective_group_ids,
+                center_node_uuid=center_node_uuid,
+            )
 
-        facts = [format_fact_result(edge) for edge in relevant_edges]
-        return FactSearchResponse(message='Facts retrieved successfully', facts=facts)
+            if not search_results.edges and not search_results.communities:
+                return FactSearchResponse(message='No relevant facts or communities found', facts=[], communities=[])
+
+            # Format facts
+            facts = [format_fact_result(edge) for edge in search_results.edges]
+
+            # Format community results
+            formatted_communities = [
+                {
+                    'uuid': community.uuid,
+                    'name': community.name,
+                    'summary': community.summary if hasattr(community, 'summary') else '',
+                    'group_id': community.group_id,
+                    'created_at': community.created_at.isoformat() if hasattr(community, 'created_at') else None,
+                }
+                for community in search_results.communities
+            ] if search_results.communities else []
+
+            return FactSearchResponse(
+                message='Facts retrieved successfully', 
+                facts=facts,
+                communities=formatted_communities
+            )
+        else:
+            # Original implementation without communities
+            relevant_edges = await client.search(
+                group_ids=effective_group_ids,
+                query=query,
+                num_results=max_facts,
+                center_node_uuid=center_node_uuid,
+            )
+
+            if not relevant_edges:
+                return FactSearchResponse(message='No relevant facts found', facts=[], communities=[])
+
+            facts = [format_fact_result(edge) for edge in relevant_edges]
+            return FactSearchResponse(message='Facts retrieved successfully', facts=facts, communities=[])
     except Exception as e:
         error_msg = str(e)
         logger.error(f'Error searching facts: {error_msg}')
@@ -1779,12 +1878,19 @@ async def run_dual_servers():
                     try:
                         # Start building communities
                         start_time = time.time()
+                        logger.info("Step 1: Creating local Graphiti client...")
+                        
                         # Move time-consuming community building to thread pool to avoid blocking event loop
                         def _run_build_sync():
                             import asyncio as _aio
                             from graphiti_core import Graphiti as _Graphiti
+                            from graphiti_core.utils.maintenance.community_operations import build_communities as build_communities_impl
+                            from graphiti_core.utils.maintenance.community_operations import remove_communities, get_community_clusters
+                            import logging
+                            _logger = logging.getLogger(__name__)
 
                             async def _do_build():
+                                _logger.info("Step 2: Initializing Graphiti client...")
                                 local_graphiti = _Graphiti(
                                     uri=config.neo4j.uri,
                                     user=config.neo4j.user,
@@ -1795,12 +1901,221 @@ async def run_dual_servers():
                                     max_coroutines=5,
                                 )
                                 try:
-                                    await local_graphiti.build_communities()
+                                    _logger.info("Step 3: Removing existing communities...")
+                                    await remove_communities(local_graphiti.driver)
+                                    _logger.info("Step 3: Existing communities removed")
+                                    
+                                    _logger.info("Step 4: Getting community clusters (running label propagation algorithm)...")
+                                    
+                                    # Manually implement get_community_clusters with detailed logging
+                                    from graphiti_core.nodes import EntityNode
+                                    from graphiti_core.utils.maintenance.community_operations import label_propagation, Neighbor
+                                    from graphiti_core.helpers import semaphore_gather
+                                    
+                                    community_clusters = []
+                                    
+                                    # Get all group_ids
+                                    _logger.info("Step 4.1: Fetching all group_ids from database...")
+                                    group_id_values, _, _ = await local_graphiti.driver.execute_query(
+                                        """
+                                        MATCH (n:Entity)
+                                        WHERE n.group_id IS NOT NULL
+                                        RETURN collect(DISTINCT n.group_id) AS group_ids
+                                        """
+                                    )
+                                    group_ids = group_id_values[0]['group_ids'] if group_id_values else []
+                                    _logger.info(f"Step 4.1: Found {len(group_ids)} group_ids: {group_ids}")
+                                    
+                                    # Process each group_id
+                                    for idx, group_id in enumerate(group_ids):
+                                        _logger.info(f"Step 4.{idx+2}: Processing group_id {idx+1}/{len(group_ids)}: {group_id}")
+                                        
+                                        # Get all entities in this group
+                                        nodes = await EntityNode.get_by_group_ids(local_graphiti.driver, [group_id])
+                                        _logger.info(f"Step 4.{idx+2}.1: Found {len(nodes)} entities in group {group_id}")
+                                        
+                                        # Build projection (neighbor graph)
+                                        projection = {}
+                                        _logger.info(f"Step 4.{idx+2}.2: Building neighbor projection for {len(nodes)} entities...")
+                                        
+                                        for node_idx, node in enumerate(nodes):
+                                            if node_idx % 10 == 0:  # Log every 10 nodes
+                                                _logger.info(f"  Processing entity {node_idx+1}/{len(nodes)}: {node.name}")
+                                            
+                                            records, _, _ = await local_graphiti.driver.execute_query(
+                                                """
+                                                MATCH (n:Entity {group_id: $group_id, uuid: $uuid})-[e:RELATES_TO]-(m: Entity {group_id: $group_id})
+                                                WITH count(e) AS count, m.uuid AS uuid
+                                                RETURN uuid, count
+                                                """,
+                                                uuid=node.uuid,
+                                                group_id=group_id,
+                                            )
+                                            projection[node.uuid] = [
+                                                Neighbor(node_uuid=record['uuid'], edge_count=record['count']) 
+                                                for record in records
+                                            ]
+                                        
+                                        _logger.info(f"Step 4.{idx+2}.3: Running label propagation algorithm...")
+                                        
+                                        # Implement label propagation with logging and max iterations
+                                        from collections import defaultdict
+                                        
+                                        _logger.info(f"  Label propagation: Processing {len(projection)} nodes...")
+                                        community_map = {uuid: i for i, uuid in enumerate(projection.keys())}
+                                        
+                                        max_iterations = 100  # Prevent infinite loop
+                                        iteration = 0
+                                        
+                                        while iteration < max_iterations:
+                                            iteration += 1
+                                            no_change = True
+                                            new_community_map = {}
+                                            
+                                            for uuid, neighbors in projection.items():
+                                                curr_community = community_map[uuid]
+                                                
+                                                community_candidates = defaultdict(int)
+                                                for neighbor in neighbors:
+                                                    community_candidates[community_map[neighbor.node_uuid]] += neighbor.edge_count
+                                                
+                                                community_lst = [
+                                                    (count, community) for community, count in community_candidates.items()
+                                                ]
+                                                
+                                                community_lst.sort(reverse=True)
+                                                candidate_rank, community_candidate = community_lst[0] if community_lst else (0, -1)
+                                                
+                                                if community_candidate != -1 and candidate_rank > 1:
+                                                    new_community = community_candidate
+                                                else:
+                                                    new_community = max(community_candidate, curr_community)
+                                                
+                                                new_community_map[uuid] = new_community
+                                                
+                                                if new_community != curr_community:
+                                                    no_change = False
+                                            
+                                            if iteration % 10 == 0:
+                                                _logger.info(f"  Label propagation: Iteration {iteration}, no_change={no_change}")
+                                            
+                                            if no_change:
+                                                _logger.info(f"  Label propagation: Converged after {iteration} iterations")
+                                                break
+                                            
+                                            community_map = new_community_map
+                                        
+                                        if iteration >= max_iterations:
+                                            _logger.warning(f"  Label propagation: Reached max iterations ({max_iterations}), forcing stop")
+                                        
+                                        # Build clusters from community_map
+                                        community_cluster_map = defaultdict(list)
+                                        for uuid, community in community_map.items():
+                                            community_cluster_map[community].append(uuid)
+                                        
+                                        cluster_uuids = [cluster for cluster in community_cluster_map.values()]
+                                        _logger.info(f"Step 4.{idx+2}.4: Found {len(cluster_uuids)} clusters in group {group_id}")
+                                        
+                                        # Fetch entity nodes for each cluster
+                                        _logger.info(f"Step 4.{idx+2}.5: Fetching entity nodes for clusters...")
+                                        clusters = list(
+                                            await semaphore_gather(
+                                                *[EntityNode.get_by_uuids(local_graphiti.driver, cluster) 
+                                                  for cluster in cluster_uuids]
+                                            )
+                                        )
+                                        community_clusters.extend(clusters)
+                                        _logger.info(f"Step 4.{idx+2}.6: Completed processing group {group_id}")
+                                    
+                                    _logger.info(f"Step 4: Found {len(community_clusters)} community clusters total")
+                                    
+                                    if len(community_clusters) == 0:
+                                        _logger.warning("No community clusters found, skipping community building")
+                                        return
+                                    
+                                    # Log cluster sizes
+                                    for i, cluster in enumerate(community_clusters[:5]):  # Show first 5
+                                        _logger.info(f"  Cluster {i+1}: {len(cluster)} entities")
+                                    if len(community_clusters) > 5:
+                                        _logger.info(f"  ... and {len(community_clusters) - 5} more clusters")
+                                    
+                                    _logger.info("Step 5: Building communities (calling LLM to generate summaries)...")
+                                    _logger.info(f"  This step may take several minutes depending on cluster count ({len(community_clusters)}) and LLM response time...")
+                                    
+                                    # Manually implement build_communities with detailed logging
+                                    from graphiti_core.utils.maintenance.community_operations import build_community
+                                    from graphiti_core.helpers import semaphore_gather
+                                    import asyncio
+                                    
+                                    MAX_COMMUNITY_BUILD_CONCURRENCY = 10
+                                    semaphore = asyncio.Semaphore(MAX_COMMUNITY_BUILD_CONCURRENCY)
+                                    
+                                    completed_count = 0
+                                    total_count = len(community_clusters)
+                                    
+                                    async def limited_build_community(cluster_idx, cluster):
+                                        nonlocal completed_count
+                                        async with semaphore:
+                                            _logger.info(f"  Building community {cluster_idx+1}/{total_count} (cluster size: {len(cluster)} entities)...")
+                                            try:
+                                                result = await build_community(local_graphiti.llm_client, cluster)
+                                                completed_count += 1
+                                                _logger.info(f"  Completed community {cluster_idx+1}/{total_count} ({completed_count}/{total_count} done)")
+                                                return result
+                                            except Exception as e:
+                                                _logger.error(f"  Failed to build community {cluster_idx+1}/{total_count}: {str(e)}")
+                                                raise
+                                    
+                                    _logger.info(f"Step 5.1: Starting to build {total_count} communities with concurrency={MAX_COMMUNITY_BUILD_CONCURRENCY}...")
+                                    communities = list(
+                                        await semaphore_gather(
+                                            *[limited_build_community(i, cluster) for i, cluster in enumerate(community_clusters)]
+                                        )
+                                    )
+                                    
+                                    community_nodes = []
+                                    community_edges = []
+                                    for community in communities:
+                                        community_nodes.append(community[0])
+                                        community_edges.extend(community[1])
+                                    
+                                    _logger.info(f"Step 5: Built {len(community_nodes)} community nodes and {len(community_edges)} edges")
+                                    
+                                    _logger.info("Step 6: Generating name embeddings for communities...")
+                                    from graphiti_core.helpers import semaphore_gather
+                                    await semaphore_gather(
+                                        *[node.generate_name_embedding(local_graphiti.embedder) for node in community_nodes],
+                                        max_coroutines=local_graphiti.max_coroutines,
+                                    )
+                                    _logger.info("Step 6: Name embeddings generated")
+                                    
+                                    _logger.info("Step 7: Saving community nodes to database...")
+                                    await semaphore_gather(
+                                        *[node.save(local_graphiti.driver) for node in community_nodes],
+                                        max_coroutines=local_graphiti.max_coroutines,
+                                    )
+                                    _logger.info("Step 7: Community nodes saved")
+                                    
+                                    _logger.info("Step 8: Saving community edges to database...")
+                                    await semaphore_gather(
+                                        *[edge.save(local_graphiti.driver) for edge in community_edges],
+                                        max_coroutines=local_graphiti.max_coroutines,
+                                    )
+                                    _logger.info("Step 8: Community edges saved")
+                                    
+                                except Exception as e:
+                                    _logger.error(f"Error during community building: {str(e)}")
+                                    import traceback
+                                    _logger.error(f"Traceback: {traceback.format_exc()}")
+                                    raise
                                 finally:
+                                    _logger.info("Step 9: Closing Graphiti driver...")
                                     await local_graphiti.driver.close()
+                                    _logger.info("Step 9: Driver closed")
 
                             _aio.run(_do_build())
 
+                        logger.info("Starting community building in background thread...")
                         await asyncio.to_thread(_run_build_sync)
                         end_time = time.time()
 
