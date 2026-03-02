@@ -31,9 +31,7 @@ async def get_community_clusters(
 ) -> list[list[EntityNode]]:
     if driver.graph_operations_interface:
         try:
-            return await driver.graph_operations_interface.get_community_clusters(
-                driver, group_ids
-            )
+            return await driver.graph_operations_interface.get_community_clusters(driver, group_ids)
         except NotImplementedError:
             pass
 
@@ -209,7 +207,9 @@ async def build_community(
     )
     community_edges = build_community_edges(community_cluster, community_node, now)
 
-    logger.debug((community_node, community_edges))
+    logger.debug(
+        f'Built community {community_node.uuid} with {len(community_edges)} edges'
+    )
 
     return community_node, community_edges
 
